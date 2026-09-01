@@ -1,0 +1,74 @@
+name: ggsell
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ggsell
+      POSTGRES_USER: ggsell
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init.sh:/docker-entrypoint-initdb.d/10-test-db.sh:ro
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ggsell -d ggsell"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    command:
+      # The race test holds up to 50 concurrent connections. The default limit
+      # is sufficient, but pin it so behavior does not depend on the image version.
+      - postgres
+      - -c
+      - max_connections=200
+
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+
+  web:
+    image: nginx:1.27-alpine
+    depends_on:
+      - app
+    volumes:
+      - .:/app:ro
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8000:80"
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    # --tries=1 keeps retries in the domain layer (FulfilOrder). Blind queue
+    # retries on top of domain retries would corrupt attempt accounting.
+    command: php artisan queue:work --queue=delivery,default --tries=1 --timeout=120 --sleep=1
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: php artisan schedule:work
+    restart: unless-stopped
+
+volumes:
+  pgdata:

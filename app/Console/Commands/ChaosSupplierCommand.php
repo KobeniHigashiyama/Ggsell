@@ -1,0 +1,65 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Console\Commands;
+
+use App\Stub\Supplier\ChaosMode;
+use App\Stub\Supplier\SupplierIssueController;
+use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Cache;
+
+/**
+ * Change supplier stub behavior on the live stack.
+ *
+ * The mode lives in shared cache and applies immediately to every process
+ * without container restarts or .env changes. Acceptance scenarios are therefore
+ * reproducible with one command.
+ */
+class ChaosSupplierCommand extends Command
+{
+    protected $signature = 'chaos:supplier
+        {supplier : a или b}
+        {mode : ok | error | timeout | out_of_stock | random}
+        {--ttl=600 : на сколько секунд закрепить режим}';
+
+    protected $description = 'Заставить поставщика-заглушку вести себя определённым образом';
+
+    public function handle(): int
+    {
+        $supplier = (string) $this->argument('supplier');
+        $mode = (string) $this->argument('mode');
+
+        if (! array_key_exists($supplier, (array) config('ggsell.stubs'))) {
+            $this->components->error("Неизвестный поставщик: {$supplier}.");
+
+            return self::FAILURE;
+        }
+
+        if ($mode === 'random') {
+            Cache::forget(SupplierIssueController::overrideKey($supplier));
+            $this->components->info("Поставщик {$supplier} возвращён к случайному поведению.");
+
+            return self::SUCCESS;
+        }
+
+        if (ChaosMode::tryFrom($mode) === null) {
+            $this->components->error("Неизвестный режим: {$mode}.");
+
+            return self::FAILURE;
+        }
+
+        Cache::put(
+            SupplierIssueController::overrideKey($supplier),
+            $mode,
+            now()->addSeconds((int) $this->option('ttl')),
+        );
+
+        $this->components->info(sprintf(
+            'Поставщик %s переведён в режим %s на %d с.',
+            $supplier, $mode, (int) $this->option('ttl'),
+        ));
+
+        return self::SUCCESS;
+    }
+}
