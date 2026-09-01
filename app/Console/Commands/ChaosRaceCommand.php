@@ -19,13 +19,13 @@ use Illuminate\Support\Str;
 class ChaosRaceCommand extends Command
 {
     protected $signature = 'chaos:race
-        {--sku=KEY-CS2-PRIME : SKU для нового заказа}
-        {--order= : использовать существующий заказ вместо нового}
-        {--n=50 : степень параллелизма}
-        {--mode=distinct : distinct — разные event_id по одному заказу; same — один и тот же event_id}
-        {--wait=20 : сколько секунд ждать завершения выдачи}';
+        {--sku=KEY-CS2-PRIME : SKU for a new order}
+        {--order= : use an existing order instead of creating one}
+        {--n=50 : concurrency level}
+        {--mode=distinct : distinct uses different event IDs; same reuses one event ID}
+        {--wait=20 : seconds to wait for delivery}';
 
-    protected $description = 'Обстрелять один заказ параллельными вебхуками оплаты и проверить, что выдача произошла ровно один раз';
+    protected $description = 'Send concurrent payment webhooks to one order and verify exactly-once delivery';
 
     public function handle(): int
     {
@@ -39,7 +39,7 @@ class ChaosRaceCommand extends Command
         }
 
         $this->components->info(sprintf(
-            'Заказ %s (%s, %d %s), параллелизм %d, режим event_id: %s',
+            'Order %s (%s, %d %s), concurrency %d, event ID mode: %s',
             $order->public_id, $order->sku, intdiv($order->amount_minor, 100), $order->currency, $concurrency, $mode,
         ));
 
@@ -57,7 +57,7 @@ class ChaosRaceCommand extends Command
             $order = Order::query()->where('public_id', $existing)->first();
 
             if ($order === null) {
-                $this->components->error("Заказ {$existing} не найден.");
+                $this->components->error("Order {$existing} not found.");
             }
 
             return $order;
@@ -70,7 +70,7 @@ class ChaosRaceCommand extends Command
         $publicId = data_get(json_decode((string) $response['body'], true), 'data.order_id');
 
         if (! is_string($publicId)) {
-            $this->components->error('Не удалось создать заказ: '.$response['body']);
+            $this->components->error('Failed to create order: '.$response['body']);
 
             return null;
         }
@@ -136,7 +136,7 @@ class ChaosRaceCommand extends Command
 
         curl_multi_close($multi);
 
-        $this->line("  Залп из {$concurrency} запросов занял {$elapsedMs} мс");
+        $this->line("  Burst of {$concurrency} requests completed in {$elapsedMs} ms");
 
         return $results;
     }
@@ -149,7 +149,7 @@ class ChaosRaceCommand extends Command
 
         foreach ($results as $result) {
             $byStatus[$result['status']] = ($byStatus[$result['status']] ?? 0) + 1;
-            $outcome = data_get(json_decode($result['body'], true), 'outcome', 'нет ответа');
+            $outcome = data_get(json_decode($result['body'], true), 'outcome', 'no response');
             $byOutcome[$outcome] = ($byOutcome[$outcome] ?? 0) + 1;
         }
 
@@ -163,7 +163,7 @@ class ChaosRaceCommand extends Command
             $rows[] = ['outcome: '.$outcome, $count];
         }
 
-        $this->table(['Ответы вебхука', 'Количество'], $rows);
+        $this->table(['Webhook response', 'Count'], $rows);
     }
 
     private function awaitSettlement(Order $order, int $seconds): Order
@@ -218,20 +218,20 @@ class ChaosRaceCommand extends Command
         $expectedEvents = $mode === 'same' ? 1 : $concurrency;
 
         $checks = [
-            ['Событий записано (без потерь)', $eventsRecorded, $eventsRecorded === $expectedEvents],
-            ['Выдач по заказу', $deliveries, $deliveries === 1],
-            ['Ключей списано у поставщиков', $issuedKeys, $issuedKeys === 1],
-            ['Событий "оплачено" применено', $paidEventsApplied, $paidEventsApplied === 1],
-            ['Несходящихся проводок', $imbalance, $imbalance === 0],
-            ['Сальдо обязательства (выдан → 0)', $liability, $liability === 0],
-            ['Статус заказа', $order->status->value, $order->status->value === 'delivered'],
+            ['Events recorded without loss', $eventsRecorded, $eventsRecorded === $expectedEvents],
+            ['Order deliveries', $deliveries, $deliveries === 1],
+            ['Supplier keys consumed', $issuedKeys, $issuedKeys === 1],
+            ['Paid events applied', $paidEventsApplied, $paidEventsApplied === 1],
+            ['Unbalanced transactions', $imbalance, $imbalance === 0],
+            ['Liability balance after delivery', $liability, $liability === 0],
+            ['Order status', $order->status->value, $order->status->value === 'delivered'],
         ];
 
         $this->newLine();
         $this->table(
-            ['Проверка', 'Значение', 'Итог'],
+            ['Check', 'Value', 'Result'],
             array_map(
-                static fn (array $row): array => [$row[0], $row[1], $row[2] ? 'OK' : 'ПРОВАЛ'],
+                static fn (array $row): array => [$row[0], $row[1], $row[2] ? 'OK' : 'FAILED'],
                 $checks,
             ),
         );
@@ -240,14 +240,14 @@ class ChaosRaceCommand extends Command
 
         if ($failed !== []) {
             $this->components->error(sprintf(
-                '%d вебхуков привели к нарушению инвариантов.', $concurrency,
+                '%d webhooks violated system invariants.', $concurrency,
             ));
 
             return self::FAILURE;
         }
 
         $this->components->info(sprintf(
-            '%d параллельных вебхуков — ровно одна выдача, ровно один ключ, журнал сходится.',
+            '%d concurrent webhooks produced exactly one delivery, one key, and a balanced ledger.',
             $concurrency,
         ));
 

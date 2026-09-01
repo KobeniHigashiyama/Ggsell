@@ -21,7 +21,7 @@ class ShowcaseTest extends TestCase
     }
 
     #[Test]
-    public function витрина_отдаёт_остаток_из_проекции(): void
+    public function storefront_returns_stock_from_projection(): void
     {
         $response = $this->getJson('/api/v1/products?limit=50')->assertOk();
 
@@ -36,7 +36,7 @@ class ShowcaseTest extends TestCase
     }
 
     #[Test]
-    public function keyset_пагинация_обходит_каталог_без_пропусков_и_повторов(): void
+    public function keyset_pagination_traverses_catalog_without_gaps_or_duplicates(): void
     {
         $seen = [];
         $cursor = null;
@@ -54,12 +54,12 @@ class ShowcaseTest extends TestCase
 
         $expected = DB::table('products')->where('is_active', true)->count();
 
-        $this->assertCount($expected, $seen, 'Обход должен покрыть каталог целиком.');
-        $this->assertSame($expected, count(array_unique($seen)), 'Ни один SKU не должен встретиться дважды.');
+        $this->assertCount($expected, $seen, 'Traversal must cover the entire catalog.');
+        $this->assertSame($expected, count(array_unique($seen)), 'No SKU may appear twice.');
     }
 
     #[Test]
-    public function фильтр_по_типу_и_наличию_работает(): void
+    public function type_and_availability_filters_work(): void
     {
         $this->getJson('/api/v1/products?type=giftcard&limit=50')
             ->assertOk()
@@ -71,7 +71,7 @@ class ShowcaseTest extends TestCase
     }
 
     #[Test]
-    public function выключенный_товар_не_попадает_на_витрину(): void
+    public function disabled_product_is_not_shown_on_storefront(): void
     {
         DB::table('products')->where('sku', 'KEY-CS2-PRIME')->update(['is_active' => false]);
 
@@ -85,7 +85,7 @@ class ShowcaseTest extends TestCase
      * not accept directly. The documented representation must not return 422.
      */
     #[Test]
-    public function фильтр_наличия_понимает_строковые_значения(): void
+    public function availability_filter_accepts_string_values(): void
     {
         foreach (['1', 'true', 'True'] as $value) {
             $skus = array_column(
@@ -93,7 +93,7 @@ class ShowcaseTest extends TestCase
                 'sku',
             );
 
-            $this->assertSame(['KEY-CS2-PRIME'], $skus, "Значение {$value} должно включать фильтр.");
+            $this->assertSame(['KEY-CS2-PRIME'], $skus, "Value {$value} must enable the filter.");
         }
 
         foreach (['0', 'false'] as $value) {

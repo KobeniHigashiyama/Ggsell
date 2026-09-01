@@ -22,7 +22,7 @@ class OrderApiTest extends TestCase
     }
 
     #[Test]
-    public function заказ_создаётся_с_ценой_зафиксированной_на_момент_покупки(): void
+    public function order_is_created_with_price_frozen_at_purchase_time(): void
     {
         $this->postJson('/api/v1/orders', ['sku' => 'KEY-GTA5'])
             ->assertCreated()
@@ -34,7 +34,7 @@ class OrderApiTest extends TestCase
     }
 
     #[Test]
-    public function код_не_отдаётся_пока_заказ_не_выдан(): void
+    public function code_is_hidden_until_order_is_delivered(): void
     {
         $order = Order::query()->create([
             'public_id' => Order::newPublicId(),
@@ -53,7 +53,7 @@ class OrderApiTest extends TestCase
     }
 
     #[Test]
-    public function повтор_с_тем_же_ключом_идемпотентности_не_создаёт_второй_заказ(): void
+    public function repeated_idempotency_key_does_not_create_second_order(): void
     {
         $headers = ['Idempotency-Key' => 'order-key-1'];
         $payload = ['sku' => 'KEY-GTA5'];
@@ -69,7 +69,7 @@ class OrderApiTest extends TestCase
     }
 
     #[Test]
-    public function тот_же_ключ_с_другим_телом_отвергается(): void
+    public function same_idempotency_key_with_different_body_is_rejected(): void
     {
         $headers = ['Idempotency-Key' => 'order-key-2'];
 
@@ -81,7 +81,7 @@ class OrderApiTest extends TestCase
     }
 
     #[Test]
-    public function несуществующий_sku_отвергается_валидацией(): void
+    public function nonexistent_sku_is_rejected_by_validation(): void
     {
         $this->postJson('/api/v1/orders', ['sku' => 'NO-SUCH-SKU'])
             ->assertStatus(422)
@@ -89,13 +89,13 @@ class OrderApiTest extends TestCase
     }
 
     #[Test]
-    public function неизвестный_заказ_даёт_404(): void
+    public function unknown_order_returns_404(): void
     {
         $this->getJson('/api/v1/orders/ord_missing')->assertNotFound();
     }
 
     #[Test]
-    public function снятый_с_продажи_товар_даёт_422_а_не_500(): void
+    public function disabled_product_returns_422_instead_of_500(): void
     {
         DB::table('products')
             ->where('sku', 'KEY-GTA5')
@@ -107,8 +107,8 @@ class OrderApiTest extends TestCase
     }
 
     #[Test]
-    public function битый_курсор_витрины_даёт_400_а_не_первую_страницу(): void
+    public function malformed_storefront_cursor_returns_400_instead_of_first_page(): void
     {
-        $this->getJson('/api/v1/products?cursor=не-курсор')->assertStatus(400);
+        $this->getJson('/api/v1/products?cursor=not-a-cursor')->assertStatus(400);
     }
 }

@@ -24,7 +24,7 @@ final readonly class ResolveOrphanedCode
         $orphan = OrphanedCode::query()->findOrFail($id);
 
         if ($orphan->resolved_at !== null) {
-            throw new DomainException("Осиротевший код {$id} уже разобран: {$orphan->resolution}");
+            throw new DomainException("Orphaned code {$id} is already resolved: {$orphan->resolution}");
         }
 
         $orphan->forceFill([

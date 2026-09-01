@@ -98,7 +98,7 @@ final readonly class ReconciliationReport
             ->where('orders.paid_at', '<', $threshold);
 
         return $this->summarise(
-            'Деньги получены, товар не выдан.',
+            'Payment received but product not delivered.',
             $query,
             fn (Builder $q): Collection => $q->orderBy('orders.paid_at')
                 ->limit(self::SAMPLE_SIZE)
@@ -124,7 +124,7 @@ final readonly class ReconciliationReport
             ->whereNull('orders.paid_at');
 
         return $this->summarise(
-            'Товар выдан по заказу без подтверждённой оплаты.',
+            'Product delivered without confirmed payment.',
             $query,
             fn (Builder $q): Collection => $q->limit(self::SAMPLE_SIZE)->get([
                 'orders.public_id', 'orders.status', 'deliveries.delivered_at',
@@ -146,7 +146,7 @@ final readonly class ReconciliationReport
             ->where('orders.status', '!=', OrderStatus::Delivered->value);
 
         return $this->summarise(
-            'Выдача записана, но заказ не переведён в delivered.',
+            'Delivery recorded but order not transitioned to delivered.',
             $query,
             fn (Builder $q): Collection => $q->limit(self::SAMPLE_SIZE)->get([
                 'orders.public_id', 'orders.status', 'deliveries.delivered_at',
@@ -176,7 +176,7 @@ final readonly class ReconciliationReport
             ->havingRaw('COUNT(*) > 1');
 
         return [
-            'description' => 'По заказу прошло больше одного успешного платежа (информационно).',
+            'description' => 'More than one successful payment was recorded for the order (informational).',
             'informational' => true,
             'count' => DB::query()->fromSub($grouped(), 'dup')->count(),
             'items' => DB::query()->fromSub($grouped(), 'dup')->limit(self::SAMPLE_SIZE)->get()->all(),
@@ -200,7 +200,7 @@ final readonly class ReconciliationReport
                 ->orWhere('payment_events.outcome', 'mismatch'));
 
         return $this->summarise(
-            'Платёж получен, но не применён к заказу (несовпадение суммы или отсутствующий заказ).',
+            'Payment received but not applied due to an amount mismatch or missing order.',
             $query,
             fn (Builder $q): Collection => $q->orderBy('payment_events.received_at')
                 ->limit(self::SAMPLE_SIZE)
@@ -236,7 +236,7 @@ final readonly class ReconciliationReport
                 ->where('payment_events.outcome', 'no_op'));
 
         return $this->summarise(
-            'Отказ платежа по заказу, деньги за который уже были получены.',
+            'Payment failure reported for an order whose payment was already received.',
             $query,
             fn (Builder $q): Collection => $q->limit(self::SAMPLE_SIZE)->get([
                 'orders.public_id', 'orders.status', 'orders.amount_minor', 'orders.paid_at',
@@ -275,7 +275,7 @@ final readonly class ReconciliationReport
                 ->whereColumn('orphaned_codes.code', 'delivery_attempts.code'));
 
         return $this->summarise(
-            'Поставщик выдал код, но выдача не зафиксирована.',
+            'Supplier issued a code but delivery was not committed.',
             $query,
             fn (Builder $q): Collection => $q->limit(self::SAMPLE_SIZE)->get([
                 'orders.public_id', 'delivery_attempts.request_id',
@@ -300,7 +300,7 @@ final readonly class ReconciliationReport
             ->where('delivery_attempts.started_at', '<', $threshold);
 
         return $this->summarise(
-            'Обращение к поставщику без выясненного исхода.',
+            'Supplier request has an unresolved outcome.',
             $query,
             fn (Builder $q): Collection => $q->limit(self::SAMPLE_SIZE)->get([
                 'orders.public_id', 'delivery_attempts.request_id', 'delivery_attempts.supplier',
@@ -316,7 +316,7 @@ final readonly class ReconciliationReport
             ->whereNull('orphaned_codes.resolved_at');
 
         return $this->summarise(
-            'Код получен от поставщика, но не привязан к заказу.',
+            'Supplier code was received but not assigned to an order.',
             $query,
             fn (Builder $q): Collection => $q->limit(self::SAMPLE_SIZE)->get([
                 'orders.public_id', 'orphaned_codes.supplier',
@@ -341,7 +341,7 @@ final readonly class ReconciliationReport
             ->get();
 
         return [
-            'description' => 'Проводки, не сходящиеся в ноль.',
+            'description' => 'Ledger transactions whose entries do not sum to zero.',
             'count' => $rows->count(),
             'items' => $rows->all(),
         ];
@@ -394,7 +394,7 @@ final readonly class ReconciliationReport
         }
 
         return [
-            'description' => 'Сальдо обязательств перед покупателями против суммы оплаченных, но не выданных заказов.',
+            'description' => 'Customer liability balance compared with paid but undelivered orders.',
             'count' => $mismatched,
             'by_currency' => $breakdown,
         ];

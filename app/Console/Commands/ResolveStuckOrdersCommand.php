@@ -10,10 +10,10 @@ use Illuminate\Console\Command;
 class ResolveStuckOrdersCommand extends Command
 {
     protected $signature = 'orders:resolve-stuck
-        {--limit= : максимум заказов за прогон}
-        {--stuck-after= : через сколько секунд бездействия заказ считается зависшим}';
+        {--limit= : maximum orders per run}
+        {--stuck-after= : seconds of inactivity before an order is considered stuck}';
 
-    protected $description = 'Поставить в очередь повторную выдачу по оплаченным, но не выданным заказам';
+    protected $description = 'Queue another delivery attempt for paid but undelivered orders';
 
     public function handle(ResolveStuckOrders $resolveStuckOrders): int
     {
@@ -23,8 +23,8 @@ class ResolveStuckOrdersCommand extends Command
         );
 
         $this->components->info($count === 0
-            ? 'Зависших заказов нет.'
-            : "Поставлено в очередь на дожатие: {$count}.");
+            ? 'No stuck orders found.'
+            : "Queued for recovery: {$count}.");
 
         return self::SUCCESS;
     }

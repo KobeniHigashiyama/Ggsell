@@ -12,9 +12,9 @@
             <directory>tests/Feature</directory>
         </testsuite>
         <!--
-            Проверка гонок требует поднятого стека и настоящей сети, поэтому
-            вынесена в отдельный набор: `php artisan test` должен проходить и
-            без docker compose up.
+            Race-condition tests require a running stack and real network, so
+            they live in a separate suite. `php artisan test` must run without
+            docker compose up.
         -->
         <testsuite name="Integration">
             <directory>tests/Integration</directory>
@@ -32,11 +32,10 @@
         <env name="BROADCAST_CONNECTION" value="null" force="true"/>
 
         <!--
-            Тесты идут против настоящего PostgreSQL, а не SQLite в памяти.
-            Всё, что здесь проверяется — блокировки строк, SKIP LOCKED,
-            частичные индексы, поведение при нарушении ограничений — в SQLite
-            либо отсутствует, либо ведёт себя иначе. Тест на другой СУБД
-            проверял бы не ту систему, которую мы поставляем.
+            Tests use PostgreSQL rather than in-memory SQLite. Row locks,
+            SKIP LOCKED, partial indexes, and constraint violations are either
+            unavailable or behave differently in SQLite. Testing another database
+            would not validate the system being delivered.
         -->
         <env name="DB_CONNECTION" value="pgsql" force="true"/>
         <env name="DB_HOST" value="postgres" force="true"/>

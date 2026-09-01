@@ -25,18 +25,18 @@ class ParallelWebhookRaceTest extends TestCase
         parent::setUp();
 
         if (! $this->stackIsUp()) {
-            $this->markTestSkipped('Стек не поднят: docker compose up -d');
+            $this->markTestSkipped('Stack is not running: docker compose up -d');
         }
     }
 
     #[Test]
-    public function пятьдесят_параллельных_вебхуков_дают_ровно_одну_выдачу(): void
+    public function fifty_concurrent_webhooks_produce_exactly_one_delivery(): void
     {
         $this->assertRaceSucceeds('distinct');
     }
 
     #[Test]
-    public function пятьдесят_повторов_одного_события_дают_ровно_одну_выдачу(): void
+    public function fifty_retries_of_same_event_produce_exactly_one_delivery(): void
     {
         $this->assertRaceSucceeds('same');
     }
@@ -44,13 +44,16 @@ class ParallelWebhookRaceTest extends TestCase
     private function assertRaceSucceeds(string $mode): void
     {
         $process = new Process(
-            ['php', 'artisan', 'chaos:race', '--n=50', "--mode={$mode}", '--wait=30'],
+            // Leave enough time for a recently restarted worker to begin consuming
+            // jobs. This test verifies exactly-once delivery rather than latency,
+            // so the margin prevents false failures without weakening the invariant.
+            ['php', 'artisan', 'chaos:race', '--n=50', "--mode={$mode}", '--wait=60'],
             base_path(),
             // The command must use the running stack database because requests target
             // its real HTTP endpoint.
             ['DB_DATABASE' => 'ggsell', 'APP_ENV' => 'local'],
             null,
-            120,
+            180,
         );
 
         $process->run();
@@ -58,10 +61,10 @@ class ParallelWebhookRaceTest extends TestCase
         $this->assertSame(
             0,
             $process->getExitCode(),
-            "Проверка гонок в режиме {$mode} провалилась:\n".$process->getOutput().$process->getErrorOutput(),
+            "Race check failed in {$mode} mode:\n".$process->getOutput().$process->getErrorOutput(),
         );
 
-        $this->assertStringContainsString('ровно одна выдача', $process->getOutput());
+        $this->assertStringContainsString('exactly one delivery', $process->getOutput());
     }
 
     private function stackIsUp(): bool

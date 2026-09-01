@@ -1,248 +1,258 @@
-# Ключевые решения
+# Design Notes
 
-## Главный принцип
+## The governing principle
 
-**Гарантии живут в схеме базы, а не в коде.** Код падает посреди транзакции,
-воркер дублируется, вебхук приходит пятьдесят раз — уникальный индекс не
-ошибается никогда. Приложение только организует работу вокруг ограничений,
-которые физически невозможно нарушить.
+**Guarantees live in the database schema, not in application conventions.**
+Code crashes mid-transaction, workers get duplicated, webhooks arrive fifty
+times — a unique index never gets it wrong. The application layer only
+organizes work around constraints that are physically impossible to violate.
 
-Отсюда следует и второе решение: **попытка выдачи — самостоятельная сущность
-со своим состоянием**, а не деталь HTTP-вызова. Именно поэтому у неё есть
-статус `unknown`, и именно он решает ловушку таймаута.
+A second decision follows from the first: **a delivery attempt is a first-class
+entity with its own state**, not an implementation detail of an HTTP call. That
+is why it has an `unknown` status, and that status is what solves the timeout
+trap.
 
-## Где физически живёт каждый инвариант
+## Where each invariant physically lives
 
-| Инвариант | Механизм | Файл |
+| Invariant | Mechanism | Location |
 |---|---|---|
-| Один `event_id` обрабатывается один раз | `payment_events.event_id UNIQUE` | `RecordPaymentEvent` |
-| Заказ переходит `created→paid` один раз | `SELECT … FOR UPDATE` + машина состояний | `ApplyPaymentToOrder` |
-| Исход события не переписывается задним числом | `FOR UPDATE` по строке события | `ApplyPaymentToOrder` |
-| У заказа не более одной выдачи | `deliveries.order_id UNIQUE` | `CommitDelivery` |
-| Один код не уходит в два заказа | `deliveries.code UNIQUE` | `CommitDelivery` |
-| Повтор после таймаута не выдаёт второй код | `delivery_attempts.request_id UNIQUE` + `stub.supplier_requests.request_id PK` | `FulfilOrder`, заглушка |
-| Транспортный сбой не закрывает подвешенную попытку | вердикт принимается только при наличии HTTP-статуса | `DeliveryAttempt::resolveStatus` |
-| Полученный код не теряется при падении процесса | фиксация из базы до любого нового обращения | `FulfilOrder::commitAlreadyIssuedCode` |
-| Один ключ — в один заказ | `FOR UPDATE SKIP LOCKED` + `supplier_requests.key_id UNIQUE` | `SupplierIssueController` |
-| Деньги всегда сходятся | проверка баланса до записи + `UNIQUE(ref_type, ref_id, account)` | `PostTransaction` |
-| Финальный статус неизменяем | таблица разрешённых переходов | `OrderStatus` |
+| An `event_id` is processed once | `payment_events.event_id UNIQUE` | `RecordPaymentEvent` |
+| An order moves `created → paid` once | `SELECT … FOR UPDATE` + state machine | `ApplyPaymentToOrder` |
+| An event outcome is never overwritten | row lock on the event itself | `ApplyPaymentToOrder` |
+| An order has at most one delivery | `deliveries.order_id UNIQUE` | `CommitDelivery` |
+| A code never reaches two orders | `deliveries.code UNIQUE` | `CommitDelivery` |
+| A retry after timeout issues no second code | `delivery_attempts.request_id UNIQUE` + `stub.supplier_requests.request_id PK` | `FulfilOrder`, stub |
+| A transport failure cannot close an open attempt | verdict accepted only with an HTTP status | `DeliveryAttempt::resolveStatus` |
+| An issued code survives a crash before commit | committed from storage before any new call | `FulfilOrder::commitAlreadyIssuedCode` |
+| Two runs cannot open two attempts | attempt creation under the order row lock | `FulfilOrder::openAttempt` |
+| One key goes to one order | `FOR UPDATE SKIP LOCKED` + `supplier_requests.key_id UNIQUE` | `SupplierIssueController` |
+| The ledger always balances | balance checked before write + `UNIQUE(ref_type, ref_id, account)` | `PostTransaction` |
+| Final states are immutable | explicit transition table | `OrderStatus` |
 
-Почти всё — в базе. `ShouldBeUnique` на джобе тоже есть, но как оптимизация:
-блокировка в кэше может истечь, уникальный индекс — нет.
-
----
-
-## Этап 2. Exactly-once под гонками
-
-Критерий приёмки говорит о пятидесяти вебхуках **по одному заказу**, и у них
-могут быть **разные** `event_id` — это пятьдесят событий, а не пятьдесят копий
-одного. Дедуп по `event_id` там не срабатывает вообще. Работу делает блокировка
-строки заказа.
-
-Пять слоёв, по порядку срабатывания:
-
-1. **`payment_events.event_id UNIQUE`.** Дубль ловится на попытке вставки, а не
-   проверкой «сначала SELECT». Проверка перед вставкой сама по себе гонка: под
-   пятьюдесятью параллельными запросами все пятьдесят увидят пустой SELECT.
-2. **`SELECT … FOR UPDATE` по заказу.** Ровно один совершает переход
-   `created → paid`, остальные сорок девять дожидаются блокировки, видят уже
-   оплаченный заказ и выходят с `no_op`.
-3. **`ShouldBeUnique` на джобе.** Не гарантия, а экономия работы.
-4. **`deliveries.order_id UNIQUE`.** Последний рубеж: даже если два воркера
-   получили код, строка будет одна.
-5. **`FOR UPDATE SKIP LOCKED` в пуле поставщика.** Параллельные выдачи разбирают
-   разные ключи, а не выстраиваются в очередь за первым.
-
-Проигравший на четвёртом слое не молчит: его код уходит в `orphaned_codes` и
-попадает в отчёт сверки. Это оплаченный товар, выбрасывать его нельзя.
-
-**Дефект, который нашёлся при первом прогоне `chaos:race --mode=same`.**
-Инварианты выдачи держались, но исход в журнале был неверным: параллельные
-повторы одного `event_id` перезаписывали `outcome` с `applied` на `no_op`.
-Первый обработчик ещё не зафиксировал результат, повтор не отсекался как
-дубликат (`processed_at` пуст) и дописывал свой исход поверх. Лечится
-блокировкой строки самого события с повторной проверкой `processed_at` под
-блокировкой. Порядок захвата блокировок в системе везде один — сначала событие,
-потом заказ, — поэтому взаимная блокировка невозможна.
-
-### Вебхук раньше заказа
-
-Событие принимается и сохраняется с `processed_at = null`, ответ `200`.
-Отвечать ошибкой нельзя: платёжная система начнёт ретраить, а причина не в ней.
-Разбор идёт двумя путями — сразу после создания заказа и, независимо от этого,
-планировщиком. Дублирование намеренное: между проверкой «заказа нет» и его
-созданием есть окно, которое закрывает только периодическая метёлка.
-
-### Вебхуки не по порядку
-
-`orders.last_payment_event_at` хранит `occurred_at` последнего применённого
-события. Более старое событие получает исход `stale` и ничего не меняет.
-
-Отдельное решение: **оплата, пришедшая после отказа, принимается.** Формально
-`payment_failed` финальный, но проигнорировать пришедшие деньги значило бы
-«взяли оплату и не выдали» — худший из возможных исходов. Переход
-`payment_failed → paid` разрешён только для строго более свежего события.
+Almost everything sits in the database. `ShouldBeUnique` on the job exists too,
+but as an optimization: a cache lock can expire, a unique index cannot.
 
 ---
 
-## Этап 3. Ловушка таймаута
+## Stage 2 — exactly-once under concurrency
 
-Всё различие между надёжной системой и двойной выдачей умещается в различие
-между двумя исходами:
+The acceptance criterion describes fifty webhooks **for one order**, and they
+may carry **different** `event_id` values — fifty events, not fifty copies of
+one. Deduplication by `event_id` does not fire there at all. The row lock on
+the order does the work.
 
-- **Отказ** — это информация. Поставщик точно не выдал код. Можно идти к
-  следующему.
-- **Таймаут** — это отсутствие информации. Поставщик мог успеть выдать код, но
-  ответ не дошёл. Идти к следующему нельзя.
+Five layers, in the order they engage:
 
-Из этого следует всё остальное:
+1. **`payment_events.event_id UNIQUE`.** Duplicates are caught on insert, not by
+   a preceding check. Check-then-insert is itself a race: under fifty parallel
+   requests, all fifty see an empty `SELECT`.
+2. **`SELECT … FOR UPDATE` on the order.** Exactly one request performs
+   `created → paid`; the other forty-nine wait for the lock, observe a paid
+   order, and exit with `no_op`.
+3. **`ShouldBeUnique` on the job.** Not a guarantee — saved work.
+4. **`deliveries.order_id UNIQUE`.** The last line: even if two workers obtain a
+   code, only one row exists.
+5. **`FOR UPDATE SKIP LOCKED` in the supplier pool.** Parallel issuances take
+   different keys instead of queueing behind the first one.
 
-**Классификация несимметрична.** В `Rejected` попадает только то, про что мы
-точно знаем. Всё остальное — `Unknown`. Ошибка в сторону `Unknown` безобидна:
-переспросим тем же `request_id` и получим тот же ответ. Ошибка в сторону
-`Rejected` стоит второго ключа за те же деньги. Поэтому `Unknown` получают не
-только таймауты, но и успешный ответ без кода в теле, и `5xx` без разборчивого
-тела по контракту (`502`/`504` от прокси — запрос мог дойти и быть выполнен).
+The loser at layer four is not silent: its code lands in `orphaned_codes` and
+appears in the reconciliation report. It is paid-for goods and must not be
+discarded.
 
-Отдельно различаются «не дозвонились» и «дозвонились, но не дождались»: если
-TCP-соединение установить не удалось (`cURL error 6/7`), запрос физически не
-дошёл — это определённый отказ, фолбэк безопасен.
+**A defect found on the first `chaos:race --mode=same` run.** Delivery
+invariants held, but the recorded outcome was wrong: concurrent repeats of one
+`event_id` overwrote `outcome` from `applied` to `no_op`. The first handler had
+not yet committed its result, the repeat was not filtered as a duplicate
+(`processed_at` was still null), and it wrote its own outcome on top. Fixed by
+locking the event row and re-checking `processed_at` under that lock. Lock
+acquisition order is uniform across the system — event first, then order — so
+deadlock is impossible.
 
-**`request_id` детерминирован**: `req_{order}_{supplier}_{attempt_no}`.
-`attempt_no` инкрементируется **только при определённом отказе**. Инкремент на
-таймауте — это ровно тот баг, который проверяет задание.
+### Webhook before the order
 
-**Строка попытки пишется до HTTP-вызова.** Если процесс умрёт между отправкой
-запроса и ответом, в базе останется намерение с конкретным `request_id`, и
-досверка сможет выяснить исход. Без этой записи мы бы не знали, что вообще
-обращались к поставщику.
+The event is accepted and stored with `processed_at = null`, answered `200`.
+Replying with an error is wrong: the payment provider would retry something
+that is not its fault. Replay happens on two paths — immediately after order
+creation, and independently from the scheduler. The duplication is deliberate:
+there is a window between "no order found" and order creation that only a
+periodic sweep closes.
 
-**Порядок шагов в `FulfilOrder`** — главное содержание класса:
+### Out-of-order webhooks
 
-1. Захватить заказ под блокировкой, убедиться, что выдача нужна.
-2. **Досверить все незакрытые попытки** — до единого нового запроса.
-3. Только потом идти по цепочке поставщиков.
+`orders.last_payment_event_at` holds the `occurred_at` of the last applied
+event. An older event is recorded as `stale` and changes nothing.
 
-Шаг 2 перед шагом 3 и есть решение ловушки. Начать с нового запроса значило бы
-попросить второй ключ за те же деньги.
-
-Досверка предохранителем не блокируется: она не создаёт нового обязательства,
-а закрывает существующее.
-
-**Со стороны заглушки** гарантия обеспечена первичным ключом
-`stub.supplier_requests.request_id`. Повтор с тем же идентификатором физически
-не может выдать второй ключ. Режим `timeout` списывает ключ и регистрирует
-запрос **до** задержки — иначе это была бы имитация отказа, а не ловушка.
+A separate decision: **a payment that succeeds after a failure is accepted.**
+`payment_failed` is nominally final, but ignoring money that has arrived would
+mean taking payment and delivering nothing — the worst possible outcome. The
+`payment_failed → paid` transition is permitted only for a strictly newer event.
 
 ---
 
-## Этап 4. Журнал, сверка, восстановление
+## Stage 3 — the timeout trap
 
-**Двойная запись со знаковыми суммами.** Дебет положительный, кредит
-отрицательный, поэтому сходимость — обычный `SUM() = 0`. Несбалансированный
-набор отвергается **до** обращения к базе: разошедшуюся операцию просто некуда
-записать.
+The entire difference between a reliable system and a double issuance fits into
+the difference between two outcomes:
 
-Операций две:
+- **Rejection** is information. The supplier definitively issued no code. Move on.
+- **Timeout** is the absence of information. The supplier may have issued a code
+  whose response never arrived. Moving on is forbidden.
 
-| Событие | Проводки |
+Everything else follows:
+
+**Classification is asymmetric.** Only what we know for certain becomes
+`Rejected`. Everything else is `Unknown`. An error toward `Unknown` is harmless:
+we re-ask with the same `request_id` and get the same answer. An error toward
+`Rejected` costs a second key for the same money. So `Unknown` also covers a
+successful response with no code in the body and a `5xx` without a contract-shaped
+error body — a `502`/`504` from a proxy may well have reached the supplier.
+
+Connection failures are split further: if the TCP connection never opened
+(`cURL error 6/7`), the request did not arrive — that is a definite rejection
+and fallback is safe. But that verdict is synthetic, and it may close an attempt
+only on the **first** send inside a live request cycle. On the reconciliation
+path it never closes an attempt, regardless of current status: `unknown` and
+`pending` mean the same thing, "the request may have arrived". Whether the
+process died before or after sending cannot be recovered from the data.
+
+**`request_id` is deterministic**: `req_{order}_{supplier}_{attempt_no}`.
+`attempt_no` increments **only on a definite rejection**. Incrementing on
+timeout is exactly the bug this task probes for.
+
+**The attempt row is written before the HTTP call.** If the process dies between
+sending the request and receiving the answer, the database still holds the
+intent with a concrete `request_id`, and reconciliation can determine the
+outcome. Without that row we would not know we ever contacted the supplier.
+
+**Step order in `FulfilOrder`** is the substance of the class:
+
+1. Claim the order under a lock; confirm delivery is needed.
+2. Commit a code already obtained but not yet recorded.
+3. **Reconcile every open attempt** — before any new request.
+4. Only then walk the supplier chain.
+
+Steps 2 and 3 before step 4 are the solution to the trap. Starting with a new
+request would mean asking for a second key against the same payment.
+
+Reconciliation deliberately ignores the circuit breaker: it creates no new
+obligation, it closes an existing one.
+
+**On the stub side** the guarantee rests on the primary key of
+`stub.supplier_requests.request_id`. A repeat with the same identifier
+physically cannot issue a second key. The `timeout` mode claims the key and
+registers the request **before** the delay — otherwise it would simulate a
+rejection rather than a trap.
+
+---
+
+## Stage 4 — ledger, reconciliation, recovery
+
+**Double-entry with signed amounts.** Debits positive, credits negative, so
+balance is a plain `SUM() = 0`. An unbalanced set is rejected **before** the
+database is touched: there is nowhere to write a transaction that does not
+balance.
+
+| Event | Entries |
 |---|---|
-| Оплата | Дт `cash` / Кт `customer_liability` |
-| Выдача | Дт `customer_liability` / Кт `revenue` |
+| Payment | Dr `cash` / Cr `customer_liability` |
+| Delivery | Dr `customer_liability` / Cr `revenue` |
 
-Выручка признаётся в момент выдачи, а не оплаты: до выдачи мы должны товар.
+Revenue is recognized at delivery, not at payment: until delivery we owe goods.
 
-Идемпотентность — `UNIQUE(ref_type, ref_id, account)`. Восстановление и фоновое
-дожатие ходят теми же путями, что и основной поток, и обязаны иметь право
-вызвать проводку повторно, не задвоив деньги.
+Idempotency comes from `UNIQUE(ref_type, ref_id, account)`. Recovery and
+background retries travel the same paths as the main flow and must be free to
+re-post without duplicating money.
 
-**Самая содержательная проверка сверки** — не сходимость проводок (она
-обеспечена конструкцией), а сальдо `customer_liability` против суммы заказов,
-которые оплачены, но не выданы. Эти два числа считаются из разных таблиц
-разными путями и обязаны совпадать копейка в копейку. Любая ошибка exactly-once
-— и недовыдача, и задвоение — ломает равенство немедленно. Считается по
-валютам: суммировать рубли с иенами в одно число значило бы получить проверку,
-которая сходится по случайности.
+**The most substantive check** is not entry balance (that is structural) but the
+`customer_liability` balance against the sum of orders that are paid and not yet
+delivered. Those two numbers come from different tables by different routes and
+must match to the kopeck. Any exactly-once error — under-delivery or double
+delivery — breaks the equality immediately. It is computed per currency:
+summing rubles with yen into one number would produce a check that balances by
+accident.
 
-**Точная формулировка гарантии.** Журнал сходится по построению, и его сальдо
-обязательств сверяется с состоянием заказов. Но сходимость журнала — это
-внутренняя непротиворечивость, а не гарантия по деньгам: за его пределами
-остаются платежи, которые система отказалась применить, и отозванные после
-выдачи оплаты. Ровно поэтому в отчёте есть отдельные проверки
-`payments_not_applied` и `payments_reversed` — без них журнал бодро сходился
-бы при прямом убытке.
+**The precise scope of the guarantee.** The ledger balances by construction, and
+its liability balance is reconciled against order state. But ledger balance is
+internal consistency, not a guarantee about money: payments the system declined
+to apply, and payments reversed after delivery, fall outside it. That is exactly
+why the report carries separate `payments_not_applied` and `payments_reversed`
+checks — without them the ledger would balance cheerfully during a direct loss.
 
-**Весь отчёт читается одним снимком** в `REPEATABLE READ`. Иначе две проверки
-видели бы базу в разные моменты, и обычная оплата, закоммитившаяся между ними,
-давала бы ложное расхождение — а ложный алерт быстро приучает не реагировать
-и на настоящий. Счётчики считаются без `LIMIT`: возвращать в качестве `count`
-размер усечённой выборки значит отдать метрику, которая упирается в потолок
-и врёт мониторингу ровно тогда, когда всё плохо.
+**The whole report reads one snapshot** in `REPEATABLE READ`. Otherwise two
+checks would see the database at different moments, and an ordinary payment
+committing between them would produce a false discrepancy — and a false alert
+quickly teaches people to ignore the real one. Counts are computed without
+`LIMIT`: returning the size of a truncated sample as `count` yields a metric
+that saturates and lies to monitoring precisely when things are worst.
 
-**Найденное расхождение можно закрыть.** `orphaned_codes` гасится командой
-`ops:resolve-orphan` или ручкой `POST /ops/orphaned-codes/{id}/resolve` с
-обязательным описанием того, что с кодом сделали. Автоматически система здесь
-не решает ничего и не должна: вернуть ключ в пул поставщика ядро не может (пул
-чужой), а списать в убыток — денежное решение. Но без способа закрыть уже
-разобранное отчёт залипал бы в красном навсегда, и вместе с ним перестали бы
-замечать все следующие расхождения.
+**Findings can be closed.** `orphaned_codes` is cleared through
+`ops:resolve-orphan` or `POST /ops/orphaned-codes/{id}/resolve`, with a
+mandatory description of what was done with the code. The system decides nothing
+automatically here and should not: returning a key to the supplier pool is
+impossible (the pool is not ours), and writing it off is a financial decision.
+But without a way to close what has been handled, the report would stay red
+forever, and every subsequent discrepancy would go unnoticed with it.
 
-**Восстановление не имеет собственной логики.** `orders:resolve-stuck` ставит в
-очередь тот же самый джоб, что и вебхук оплаты. Ремонтный путь, отличающийся от
-основного, неизбежно с ним разойдётся и станет источником задвоений ровно
-тогда, когда его применят. Ограничитель — `fulfilment_runs`: безнадёжный заказ
-снимается с автодожатия и остаётся виден в сверке.
+`duplicate_payments` is **informational** and does not clear the green status.
+Telling a genuine double charge from a re-send under a new identifier is
+impossible from webhook data alone, and the acceptance scenario "fifty
+concurrent webhooks for one order" is literally fifty distinct `event_id`s with
+status `paid`.
 
-**Логи** — отдельные каналы `payments` и `delivery`, JSON, сквозной
-`correlation_id`, который переносится в джоб вместе с его payload. История
-заказа собирается одним grep, хотя проходит через разные процессы.
+**Recovery has no logic of its own.** `orders:resolve-stuck` enqueues the same
+job the payment webhook does. A repair path that differs from the main path will
+inevitably drift from it and become a source of duplication exactly when it is
+used. The limiter is `fulfilment_runs`; manual redelivery resets it, so a human
+is never blocked by an exhausted budget.
+
+**Logging** uses dedicated `payments` and `delivery` channels, JSON format, and a
+`correlation_id` carried into the job payload. An order's history reassembles
+with a single grep even though it crosses three processes.
 
 ---
 
-## Этап 5. Каталог под нагрузкой
+## Stage 5 — catalog under load
 
-Объём замера: 50 000 SKU, 400 000 ключей, PostgreSQL 17.
+Measured on 50,000 SKUs and 400,000 supplier keys, PostgreSQL 17.
 
-### Решение
+### Design
 
-**Остаток — денормализованный счётчик в отдельной узкой таблице.** Не колонка в
-`products`: счётчик меняется на каждой выдаче, и держать его внутри строки,
-покрытой индексом витрины, значит ломать HOT-обновления и раздувать индекс на
-горячем пути записи.
+**Stock is a denormalized counter in a separate narrow table.** Not a column on
+`products`: the counter changes on every issuance, and keeping it inside a row
+covered by the storefront index would defeat HOT updates and inflate the index
+on the hot write path.
 
-**Частичный покрывающий индекс:**
+**Partial covering index:**
 
 ```sql
 CREATE INDEX products_showcase_idx ON products (type, sort_rank, sku)
     INCLUDE (name, price_minor, currency, image) WHERE is_active;
 ```
 
-Порядок колонок совпадает с `ORDER BY`, поэтому отдельного шага `Sort` нет.
-`INCLUDE` покрывает весь список витрины, поэтому `Heap Fetches: 0`.
-`WHERE is_active` не даёт индексу расти вместе с архивом.
+Column order matches `ORDER BY`, so there is no separate `Sort` step. `INCLUDE`
+covers the whole storefront row list, so `Heap Fetches: 0`. `WHERE is_active`
+keeps the index from growing with the archive.
 
-**Keyset-пагинация** сравнением кортежей `(sort_rank, sku) > (?, ?)` — одним
-диапазонным поиском по индексу.
+**Keyset pagination** via tuple comparison `(sort_rank, sku) > (?, ?)` — a single
+range scan on the index.
 
-**Наличие — флаг в `products`, а не счётчик.** Тонкий момент, из-за которого
-пришлось завести `products.in_stock` рядом с `product_stock.available_count`.
-Витрина «только в наличии» — это основной вид витрины: распроданное не
-показывают. Если фильтровать по счётчику в присоединяемой таблице, предикат
-применяется ФИЛЬТРОМ после соединения, и `LIMIT` перестаёт обслуживаться
-диапазоном индекса: чтобы набрать 25 позиций, Postgres перебирает индекс
-товаров, пока не наберёт. На распроданном каталоге — штатное состояние
-площадки ключей — это вырождается в проход по всему индексу, и постоянная
-стоимость страницы, ради которой затевался keyset, теряется.
+**Availability is a flag on `products`, not a counter.** The "in stock only" view
+is the primary storefront view: sold-out items are not shown. Filtering by the
+counter on the joined table applies the predicate as a `Filter` after the join,
+and `LIMIT` stops being served by an index range: to collect 25 rows PostgreSQL
+walks the product index until it has enough. On a largely sold-out catalog — the
+normal state of a key marketplace — this degenerates into a full index scan, and
+the constant per-page cost that keyset was chosen for disappears.
 
-Почему флаг можно класть в индекс, а счётчик нельзя, — разница в частоте
-записи. `available_count` меняется на каждой выдаче; `in_stock` переключается
-только на переходе через ноль, то есть на порядки реже. Обновление идёт
-запросом, который пишет строку, лишь когда флаг реально меняется, поэтому
-подавляющее большинство выдач вообще не трогают `products`.
+The flag may live in the index while the counter may not, because of write
+frequency. `available_count` changes on every issuance; `in_stock` flips only
+when crossing zero, orders of magnitude less often. The update statement writes
+a row only when the flag actually changes, so the vast majority of deliveries
+never touch `products` at all.
 
-### Замеры
+### Measurements
 
-Горячий запрос витрины:
+Hot storefront query:
 
 ```
 Limit (actual time=0.128..0.471 rows=25)
@@ -256,280 +266,199 @@ Limit (actual time=0.128..0.471 rows=25)
 Execution Time: 0.685 ms
 ```
 
-`Heap Fetches: 0` требует заполненной карты видимости, поэтому нагрузочный
-сидер завершается `VACUUM ANALYZE`. Без вакуума Index Only Scan вынужден
-ходить в кучу за каждой строкой, и цифра не воспроизводится.
+`Heap Fetches: 0` requires a populated visibility map, so the load seeder ends
+with `VACUUM ANALYZE`. Without the vacuum, an Index Only Scan still visits the
+heap for every row and the number does not reproduce.
 
-Наивный вариант — `COUNT(*)` по пулу ключей плюс `OFFSET`:
+The naive alternative — `COUNT(*)` over the key pool plus `OFFSET`:
 
 ```
 Limit (actual time=163.070..164.721 rows=25)
   Buffers: shared hit=4471
-  ->  Sort (rows=7525)                       ← отсортировали 7525, отдали 25
+  ->  Sort (rows=7525)                       ← sorted 7525, returned 25
         ->  Finalize HashAggregate (rows=12500)
               ->  Parallel Seq Scan on supplier_keys (rows=133333, loops=3)
 Execution Time: 164.721 ms
 ```
 
-**170× разницы и 43× по буферам.** Два независимых источника деградации:
-агрегация по 400 000 строк на каждый показ витрины и `OFFSET`, заставляющий
-прочитать и выбросить всё пропускаемое.
+**170× slower, 43× more buffers.** Two independent sources of degradation:
+aggregation over 400,000 rows on every storefront render, and `OFFSET` forcing
+PostgreSQL to read and discard everything it skips.
 
-Стоимость страницы в зависимости от глубины:
+Per-page cost by depth:
 
-| Глубина | Keyset | OFFSET |
+| Depth | Keyset | OFFSET |
 |---|---|---|
-| ~100 | 0.95 мс | 1.8 мс |
-| ~25 000 | 1.00 мс | 150 мс |
-| ~49 000 | 0.88 мс | 150 мс |
+| ~100 | 0.95 ms | 1.8 ms |
+| ~25,000 | 1.00 ms | 150 ms |
+| ~49,000 | 0.88 ms | 150 ms |
 
-Keyset стоит одинаково на любой странице — это и есть свойство, ради которого
-он выбран.
+Keyset costs the same on any page — the property it was chosen for.
 
-Витрина «только в наличии», каталог распродан на 95% (2812 доступных позиций
-из 50 012):
+"In stock only" storefront, catalog 95% sold out (2,812 available of 50,012):
 
-| | Фильтр по счётчику в `product_stock` | Фильтр по флагу в `products` |
+| | Counter on joined table | Flag on `products` |
 |---|---|---|
-| Время | 3.21 мс | **0.38 мс** |
-| Буферов | 1661 | **104** |
-| Строк индекса прочитано ради 25 | 409 | **25** |
+| Time | 3.21 ms | **0.38 ms** |
+| Buffers | 1,661 | **104** |
+| Index rows read for 25 results | 409 | **25** |
 
-Стоимость первого варианта растёт по мере распродажи каталога: на 5% в наличии
-он читает 409 строк ради 25, на 1% читал бы около двух тысяч. Второй всегда
-читает ровно 25. В вырожденном случае (страница за концом доступных позиций)
-разрыв доходит до 361 мс / 192 077 буферов против 0.08 мс / 4 буферов.
+The first form's cost grows as the catalog sells out: at 5% available it reads
+409 rows for 25; at 1% it would read roughly two thousand. The second always
+reads exactly 25. In the degenerate case — a page past the end of available
+items — the gap reaches 361 ms / 192,077 buffers versus 0.08 ms / 4 buffers.
 
 ---
 
-## Как масштабировали бы дальше
+## How this would scale
 
-**Очередь.** Сейчас `database` на Postgres (`FOR UPDATE SKIP LOCKED`) — один
-компонент вместо двух, честная семантика. На потоке, где очередь начнёт
-конкурировать с бизнес-нагрузкой за тот же кластер, — Redis + Horizon,
-раздельные очереди по поставщикам, чтобы медленный поставщик не занимал воркеры
-быстрого.
+**Queue.** Currently `database` on PostgreSQL (`FOR UPDATE SKIP LOCKED`) — one
+component instead of two, with honest semantics. At volumes where the queue
+starts competing with business load for the same cluster: Redis plus Horizon,
+with separate queues per supplier so a slow supplier does not occupy the fast
+one's workers.
 
-**Витрина.** Первый шаг — не кэш, а материализованное представление или готовая
-денормализованная таблица под конкретный экран, обновляемая инкрементально.
-Кэш поверх горячего запроса на 1 мс даст меньше, чем сложности с инвалидацией.
-При росте каталога до миллионов — секционирование `products` по типу и вынос
-поиска в отдельное хранилище.
+**Storefront.** The first step is not a cache but a materialized view or a
+purpose-built denormalized table for the specific screen, refreshed
+incrementally. A cache in front of a 1 ms query buys less than the invalidation
+complexity costs. Past a few million SKUs: partition `products` by type and move
+search into a dedicated store.
 
-**Заказы и выдачи.** `orders` и `delivery_attempts` растут линейно с оборотом,
-но рабочий набор — только незавершённые заказы, и он уже отделён частичными
-индексами. Дальше — секционирование по месяцам с отправкой холодных секций в
-архив; частичные индексы позволяют сделать это без изменения запросов.
+**Orders and attempts.** `orders` and `delivery_attempts` grow linearly with
+turnover, but the working set is only unsettled orders, already separated by
+partial indexes. Next step: monthly partitioning with cold partitions archived;
+the partial indexes let this happen without changing any query.
 
-**Поставщики.** Предохранитель сейчас на процесс через общий кэш. При
-горизонтальном росте — вынести состояние в Redis с окном и полуоткрытым
-состоянием, плюс отдельный бюджет параллелизма на поставщика (bulkhead), чтобы
-один медленный не выедал общий пул воркеров.
+**Suppliers.** The circuit breaker currently uses the shared cache. Under
+horizontal growth: move its state to Redis with a proper window and half-open
+state, plus a per-supplier concurrency budget (bulkhead) so one slow supplier
+cannot consume the shared worker pool.
 
-**База.** Реплики для чтения витрины и сверки — оба запроса терпят отставание.
-Денежный путь остаётся на первичной: он читает то, что сам только что записал.
+**Database.** Read replicas for the storefront and for reconciliation — both
+tolerate lag. The money path stays on the primary: it reads what it just wrote.
 
-**Наблюдаемость.** Логи уже структурированы и связаны `correlation_id`. Дальше —
-метрики (доля `unknown` по поставщикам, возраст самого старого неразрешённого
-заказа, сальдо `customer_liability`) и алерт на ненулевой результат сверки.
-`GET /ops/reconciliation` отдаёт `409` при расхождении именно затем, чтобы
-вешаться на мониторинг без разбора тела.
+**Observability.** Logs are already structured and joined by `correlation_id`.
+Next: metrics (share of `unknown` per supplier, age of the oldest unresolved
+order, `customer_liability` balance) and an alert on a non-empty reconciliation
+result. `GET /ops/reconciliation` returns `409` on a discrepancy precisely so it
+can be wired to monitoring without parsing the body.
 
 ---
 
-## Состязательный ревью и что он нашёл
+## Adversarial review
 
-Готовое решение прогнали через независимый разбор по этапам: отдельно ядро и
-exactly-once, отдельно ловушка таймаута, отдельно сверка и каталог. Ниже —
-дефекты, которые он вскрыл, и что с ними сделано. Все исправления закрыты
-регрессионными тестами; для двух главных проверено, что тест падает, если
-вернуть ошибку обратно.
+The finished solution was put through three independent review rounds. This
+section records what they found, because the findings are more informative than
+a clean report would have been. Every fix is covered by a regression test; for
+the key ones it was verified that the test turns red when the bug is restored.
 
-**Два пути ко второй выдаче.**
+### Round one — implementation
 
-1. *Транспортный сбой на повторе закрывал подвешенную попытку.* «Соединение
-   отвергнуто» для первой отправки честно означает «запрос не дошёл, код не
-   выдан», и это давало право на фолбэк. Но тот же сбой на повторе запроса,
-   уже зависшего по таймауту, означает лишь «не смогли переспросить» —
-   поставщик к этому моменту мог держать выданный ключ. Теперь определённым
-   отказ считается только тогда, когда его вынес сам поставщик: признак —
-   наличие HTTP-статуса в ответе. Синтетический вердикт не может перевести
-   попытку из `unknown` в `failed`.
+**Two paths to a second issuance.**
 
-2. *Код получен, но выдача не зафиксирована.* Между сохранением успешного
-   ответа и записью в `deliveries` две разные транзакции. Падение процесса
-   между ними оставляло попытку в статусе `succeeded` — она не считается
-   подвешенной, в досверку не попадала, и следующий прогон заводил новый
-   `request_id`, получая второй ключ. Добавлен шаг, который фиксирует уже
-   полученный код из базы, не обращаясь к поставщику, плюс проверка
-   `uncommitted_codes` в сверке.
+1. *A transport failure closed a suspended attempt.* "Connection refused" on the
+   first send honestly means the request never arrived. On a retry of a request
+   that already timed out it means only "we could not re-ask" — the supplier may
+   by then hold an issued key. A verdict is now accepted only when the supplier
+   itself rendered it; the marker is the presence of an HTTP status.
+2. *A code obtained but not recorded.* Saving the successful response and
+   writing the delivery are two transactions. A crash between them left the
+   attempt `succeeded` — not suspended, therefore invisible to reconciliation —
+   and the next run opened a new `request_id`, taking a second key.
 
-**Три способа потерять платёж.**
+**Three ways to lose a payment.** An invalid webhook was rejected with 422 and
+no trace (the provider retries only on `5xx`, so the event was gone forever);
+amounts serialized as `"500.00"` — routine for payment gateways — were rejected
+outright; the idempotency key was released on `5xx` even though the order was
+already committed, so a client retry created a second order.
 
-3. Невалидный вебхук отвергался с 422 без единого следа. По контракту
-   платёжная система повторяет только `5xx`, то есть события больше не будет
-   никогда. Теперь полное тело уходит в платёжный лог, а сумма принимается как
-   `numeric`: шлюзы сплошь и рядом сериализуют деньги как `"500.00"`, и
-   отвергать такое значило терять реальные платежи.
+**Blind spots in reconciliation.** The `mismatch` and `pending_order` outcomes
+appeared in no check at all, though they are literally "money arrived, no goods".
+A code comment claimed otherwise.
 
-4. Ключ идемпотентности освобождался на `5xx`, хотя заказ к этому моменту уже
-   был закоммичен, — повтор клиента создавал второй заказ на ту же покупку.
-   Теперь ключ освобождается только на ошибках клиента.
+### Round two — reviewing the fixes
 
-5. Исходы `mismatch` и `pending_order` не попадали ни в одну проверку сверки,
-   хотя это буквально «деньги пришли, товара нет». Добавлена проверка
-   `payments_not_applied`; отозванный после выдачи платёж ловит
-   `payments_reversed`.
+Fresh code is more dangerous than old code; it has not settled.
 
-**Эксплуатационные.**
+**A fix that broke what it fixed.** To stop reconciliation-only runs from
+consuming the retry budget, the `fulfilment_runs` increment was moved out of
+order claim. Consequence: a run that reduced to a single reconciliation stopped
+consuming budget at all, so an order whose attempt cannot leave `unknown` was
+retried by the scheduler forever, and the `run_budget_exhausted` signal became
+unreachable for exactly the class of orders it was written for. Reverted; the
+original complaint is addressed from the other side — manual redelivery resets
+the counter.
 
-6. Бюджет прогонов тратился на прогоны без обращения к поставщику: десять
-   минут недоступности — и оплаченный заказ навсегда выпадал из автоматики,
-   а ручное дожатие упиралось в тот же исчерпанный счётчик. Теперь бюджет
-   тратится только на новом обращении к поставщику, а ручное дожатие его
-   сбрасывает.
+**Reconciliation red on healthy data.** The `payments_reversed` check selected
+events by the mere presence of a failure with a non-null `paid_at`. That caught
+both a stale failure the domain had deliberately discarded and the legitimate
+"card declined, then paid with another card" flow. Row granularity was per event
+while the amount came from the order, so two failures doubled the reported loss.
+On the running stack the report claimed a 6,980 ₽ loss on a delivered 3,490 ₽
+order and never cleared.
 
-7. Возраст в проверке «оплачен, но не выдан» считался от `updated_at`, который
-   дёргается на каждом прогоне выдачи: заказ, безуспешно перезапускавшийся
-   каждую минуту, выглядел вечно свежим и в отчёт не попадал. Якорь заменён на
-   `paid_at`.
+**A rule that protected half the cases.** The ban on transport failures closing
+an attempt guarded only `unknown`, but `pending` means the same thing.
 
-8. Счётчики в отчёте упирались в размер выборки примеров и врали на объёме;
-   отчёт читался без снимка и мог показать расхождение там, где его нет;
-   открытый ops-эндпоинт отдавал в теле живые ключи товара. Всё исправлено.
+**A swallowed result.** `commitAlreadyIssuedCode` ignored a `false` return from
+the commit, leaving the order in `delivering` with no failure status while the
+scheduler added a new `orphaned_codes` row every minute.
 
-9. Предохранитель считал сбоем пустой остаток — пять распроданных товаров
-   подряд выбивали исправного поставщика. Снятый с продажи товар возвращал
-   `500` вместо `422`. Битый курсор витрины молча показывал первую страницу.
+**A permanently locked idempotency key.** Refusing to release the key on `5xx`
+(correct in itself) created a state with no exit. An in-flight window now
+releases a stuck key after five minutes.
 
-### Второй круг: ревью самих исправлений
+### Round three — acceptance against the task
 
-Правки первого круга прогнали через отдельный разбор — свежий код опаснее
-старого, он не отлежался. Разбор нашёл дефекты в самих исправлениях, и это
-оказалось самой полезной итерацией.
+A separate review played the customer: it ran all six acceptance criteria by
+hand and verified results with independent SQL rather than trusting
+`chaos:race`. All six passed, including a scenario absent from the criteria that
+the reviewer added: `SIGKILL` of the worker exactly between writing the intent
+and the supplier's response, with the key already claimed. The system reconciled
+with the same `request_id` and issued the code once.
 
-**Исправление, которое сломало то, что чинило.** Чтобы прогон без обращения к
-поставщику не жёг бюджет, инкремент `fulfilment_runs` был перенесён из захвата
-заказа в создание попытки. Следствие: прогон, свёдшийся к одной досверке,
-перестал тратить бюджет вообще — и заказ, чья попытка не может выйти из
-`unknown`, дожимался планировщиком бесконечно, а сигнал `run_budget_exhausted`
-стал недостижим ровно для того класса заказов, ради которого писался. Перенос
-откачен; исходная претензия закрыта с другой стороны — ручное дожатие
-сбрасывает счётчик.
+It also found the most serious defect of all three rounds: **a recorded delivery
+did not move the order to `delivered`.** The result of `tryTransitionTo` was
+unchecked, so if the order had meanwhile moved to `out_of_stock` (a parallel run
+declaring a shortage after this one obtained a code), the delivery was written,
+`delivered_at` was set and revenue recognized — while the status stayed put. The
+customer saw an order with no code but a delivery date; recovery did not repair
+it and reconciliation did not see it. The transition is now mandatory, and a
+`delivered_not_settled` check stands guard over that requirement.
 
-**Сверка, красная на штатных данных.** Проверка `payments_reversed` отбирала
-события по факту наличия отказа при непустом `paid_at`. Под это попадали и
-протухший отказ, который домен сознательно отбросил, и законный сценарий
-«карта отклонена → оплатил другой». Плюс гранулярность строк была событийной,
-а сумма бралась из заказа: два отказа удваивали заявленный убыток. На стенде
-отчёт показывал 6 980 ₽ убытка по доставленному заказу на 3 490 ₽ и не гас
-никогда — то есть эндпоинт мониторинга навсегда отдавал 409. Теперь отбор идёт
-по исходу `no_op` (событие дошло до применения и было отклонено потому, что
-деньги уже у нас), а гранулярность — заказы.
+Also found: two parallel runs claimed two keys (`attempt_no` computed outside a
+lock); `in_stock=true` returned 422 because Laravel's `boolean` rule rejects the
+string form that query strings actually produce; a second successful payment
+under a different `event_id` was invisible.
 
-**Правило защищало половину.** Запрет транспортному сбою закрывать попытку
-охранял только статус `unknown`, но `pending` означает ровно то же самое:
-процесс мог умереть после отправки запроса. Различить «умер до» и «умер после»
-по данным невозможно. Теперь на пути досверки транспортный сбой не закрывает
-попытку никогда, независимо от статуса; право закрыть её сохраняется только за
-первой отправкой внутри живого цикла запроса.
+**On the environment.** During verification the Docker bind mount was found to
+serve the container a stale copy of a file after `sed -i` and `cp` — both replace
+the inode, and the container kept the old contents until restart. One control
+run produced a false green because of it. After discovery the source tree was
+compared by checksum between host and container and the whole suite re-run.
 
-**Проглоченный результат.** `commitAlreadyIssuedCode` игнорировал `false` от
-фиксации. Если код уже привязан к другому заказу, заказ оставался в
-`delivering` без статуса отказа, планировщик поднимал его каждую минуту и
-каждый прогон добавлял строку в `orphaned_codes`. Теперь результат
-обрабатывается, заказ уходит в `delivery_failed`, а сироты защищены
-уникальностью по паре «заказ + код».
+---
 
-**Вечно занятый ключ идемпотентности.** Отказ освобождать ключ на `5xx`
-(правильный сам по себе) создал состояние, из которого нет выхода: строка
-оставалась с пустым исходом, и повтор вечно получал 409 «ещё в работе». Введено
-окно ожидания: зависший ключ через пять минут снимается, клиент получает право
-повторить. Риск второго заказа тут остаётся, но он ограничен окном и виден в
-сверке, а вечная блокировка покупки не лечится ничем.
+## Deliberately not done
 
-**Отображение исключения, теряющее платежи.** `IllegalTransition` → 409
-действовало и на вебхук: платёжная система прочитала бы это как «принято, не
-повторяй», и событие пропало бы навсегда. Рендерер убран — внутреннее
-рассогласование обязано оставаться `5xx`, чтобы доставку повторили.
+- **Stock reservation at order creation.** The pool belongs to the supplier; an
+  honest reservation would be a distributed lock on someone else's resource with
+  timeout-based release. Large complexity for unpaid orders, which are the
+  majority. The task explicitly describes "paid but no code" as a normal
+  recoverable outcome, and the system follows that path.
+- **Refunds.** A failure on an order whose money was received is logged and
+  surfaced in reconciliation (`payments_reversed`), but nothing is reversed
+  automatically: a refund is a separate financial flow, not a status rollback.
+- **Webhook signature verification** — excluded by the task.
+- **Authentication.** The `ops` endpoints would be closed in a real system; here
+  they are open so a reviewer can call reconciliation with a single curl. Product
+  codes are masked out of the report regardless.
 
-**Тесты, проходящие тождественно.** Разбор указал на несколько таких: проверка
-округления копеек шла на значении `1290.00`, представимом в double точно, то
-есть была зелёной и при наивном приведении; тест `payments_reversed` содержал
-ровно одно событие на заказ — конфигурацию, при которой оба дефекта запроса
-невидимы; тест бюджета выставлял счётчик руками и не проверял, что он растёт.
-Все три переписаны на значения и конфигурации, которые различают правильную
-реализацию и неправильную. Для четырёх ключевых исправлений проверено, что
-тест краснеет при возврате бага.
+## Departure from the letter of the task
 
-### Третий круг: приёмка по критериям задания
-
-Отдельный разбор играл роль заказчика: прогонял все шесть критериев приёмки
-своими руками и перепроверял результат независимыми SQL, не доверяя выводу
-`chaos:race`. Все шесть прошли, включая сценарий, которого в критериях нет:
-`SIGKILL` воркера ровно между записью намерения и ответом поставщика, когда
-ключ уже списан. Система досверила тем же `request_id` и выдала код один раз.
-
-Найденное и исправленное:
-
-1. **Записанная выдача не переводила заказ в `delivered`.** Результат
-   `tryTransitionTo` в `CommitDelivery` не проверялся: если заказ к этому
-   моменту успел уйти в `out_of_stock` (параллельный прогон объявил дефицит
-   после того, как этот получил код), выдача записывалась, `delivered_at`
-   проставлялся, выручка признавалась — а статус оставался прежним. Покупатель
-   получал заказ без кода, но с датой выдачи; восстановление такой заказ не
-   чинило, сверка его не видела. Теперь переход обязателен: из восстановимых
-   состояний в `delivered` разрешён явно, а невозможный переход бросает
-   исключение и откатывает транзакцию вместе с выдачей. Добавлена проверка
-   `delivered_not_settled` как страж этого требования.
-
-2. **Два параллельных прогона списывали два ключа.** `attempt_no` вычислялся
-   как `max + 1` вне блокировки. Клиентский инвариант держался — вторую выдачу
-   останавливал `UNIQUE(order_id)`, — но оплаченный ключ терялся в
-   `orphaned_codes`. Открытие попытки перенесено под блокировку строки заказа
-   с отказом, если по заказу уже висит незакрытая попытка.
-
-3. **`in_stock=true` отвечал 422.** Правило `boolean` не принимает строку
-   `"true"`, а из строки запроса приходит именно она — то есть самое
-   естественное написание параметра из собственной документации не работало.
-
-4. **Двойной успешный платёж был невидим.** Второй `paid` с другим `event_id`
-   получал `no_op` и не попадал никуда. Добавлена проверка
-   `duplicate_payments` — **информационная**: отличить двойное списание от
-   повторной отправки с новым идентификатором по данным вебхука невозможно, а
-   сценарий приёмки «50 параллельных вебхуков» — это буквально пятьдесят
-   разных `event_id` со статусом `paid`. Считать его расхождением значило бы
-   держать отчёт красным на штатном прогоне.
-
-5. `chaos:race` проверял «без дублей», но не «без потерь» — добавлена проверка,
-   что все отправленные события записались. Ответ вебхука на повторный вызов
-   рапортовал чужой сохранённый исход вместо того, что сделал этот вызов.
-
-**Отдельно про среду.** При проверке выяснилось, что bind-mount отдавал
-контейнеру устаревшую копию файла после `sed -i` и `cp`: эти команды заменяют
-inode, и контейнер продолжал видеть старое содержимое до перезапуска. Один
-контрольный прогон из-за этого дал ложно-зелёный результат. После обнаружения
-дерево исходников сверено по контрольным суммам между хостом и контейнером
-(105 файлов, совпадение полное), и весь набор перепрогнан заново.
-
-## Сознательно не сделано
-
-- **Резерв остатка при создании заказа.** Пулом владеет поставщик; честный
-  резерв — распределённая блокировка чужого ресурса с освобождением по
-  таймауту. Большая сложность ради неоплаченных заказов, которых большинство.
-  Задание прямо описывает «оплачено, но кода нет» как штатный восстановимый
-  исход, и система идёт этим путём.
-- **Возвраты.** Отказ по заказу, деньги за который получены, логируется и
-  попадает в сверку, но автоматически ничего не отменяет: рефанд — отдельный
-  денежный сценарий, а не откат статуса.
-- **Проверка подписи вебхука** — исключена заданием.
-- **Аутентификация.** `ops`-эндпоинты в реальной системе закрыты; здесь их
-  оставили открытыми, чтобы ревьюер мог дёрнуть сверку одним curl.
-
-## Отступление от буквы задания
-
-Заглушки поставщиков делят процесс с ядром, а не развёрнуты отдельным сервисом.
-Граница, которая имеет значение для проверки корректности, соблюдена: своя схема
-PostgreSQL, ни одной общей модели, ни одного внешнего ключа в сторону ядра,
-обмен только по HTTP через nginx с настоящими таймаутами. Отдельное развёртывание
-добавило бы два контейнера, не изменив ни одного проверяемого свойства.
+The supplier stubs share a process with the core rather than running as a
+separate deployment. The boundary that matters for correctness is intact: their
+own PostgreSQL schema, no shared models, no foreign keys pointing at core
+tables, and communication only over HTTP through nginx with real timeouts. A
+separate deployment would add two containers without changing a single property
+under test.

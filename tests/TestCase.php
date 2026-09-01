@@ -54,6 +54,6 @@ abstract class TestCase extends BaseTestCase
             ->havingRaw('SUM(amount_minor) <> 0')
             ->count();
 
-        $this->assertSame(0, $unbalanced, 'Денежный журнал не сходится.');
+        $this->assertSame(0, $unbalanced, 'The ledger is unbalanced.');
     }
 }

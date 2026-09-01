@@ -59,7 +59,7 @@ class ReconciliationTest extends TestCase
     }
 
     #[Test]
-    public function на_чистой_системе_расхождений_нет(): void
+    public function clean_system_has_no_discrepancies(): void
     {
         $report = app(ReconciliationReport::class);
         $result = $report->build();
@@ -68,7 +68,7 @@ class ReconciliationTest extends TestCase
     }
 
     #[Test]
-    public function оплаченный_но_не_выданный_заказ_попадает_в_сверку(): void
+    public function paid_but_undelivered_order_appears_in_reconciliation(): void
     {
         // The order was paid an hour ago and remains undelivered. paid_at keeps
         // failed delivery retries from hiding its age by updating updated_at.
@@ -83,7 +83,7 @@ class ReconciliationTest extends TestCase
     }
 
     #[Test]
-    public function сальдо_обязательств_совпадает_с_суммой_невыданных_заказов(): void
+    public function liability_balance_matches_undelivered_order_total(): void
     {
         $order = $this->order(OrderStatus::Paid);
 
@@ -117,7 +117,7 @@ class ReconciliationTest extends TestCase
     }
 
     #[Test]
-    public function фоновое_дожатие_подхватывает_зависшие_заказы(): void
+    public function background_recovery_picks_up_stuck_orders(): void
     {
         Queue::fake();
 
@@ -137,7 +137,7 @@ class ReconciliationTest extends TestCase
     }
 
     #[Test]
-    public function исчерпанный_бюджет_прогонов_снимает_заказ_с_автодожатия(): void
+    public function exhausted_run_budget_removes_order_from_automatic_recovery(): void
     {
         Queue::fake();
 
@@ -157,7 +157,7 @@ class ReconciliationTest extends TestCase
     }
 
     #[Test]
-    public function эндпоинт_сверки_отдаёт_409_при_расхождении(): void
+    public function reconciliation_endpoint_returns_409_for_discrepancy(): void
     {
         $this->order(OrderStatus::OutOfStock, paidSecondsAgo: 3600);
 
@@ -171,7 +171,7 @@ class ReconciliationTest extends TestCase
      * cannot appear in paid_not_delivered and therefore needs a dedicated check.
      */
     #[Test]
-    public function платёж_с_несовпавшей_суммой_виден_в_сверке(): void
+    public function payment_with_mismatched_amount_is_visible_in_reconciliation(): void
     {
         $order = $this->order(OrderStatus::Created, paidSecondsAgo: null);
 
@@ -196,7 +196,7 @@ class ReconciliationTest extends TestCase
     }
 
     #[Test]
-    public function событие_без_заказа_после_отсечки_видно_в_сверке(): void
+    public function event_without_order_is_visible_after_cutoff(): void
     {
         $this->postJson('/api/v1/webhooks/payment', [
             'event_id' => 'evt_orphan',
@@ -220,7 +220,7 @@ class ReconciliationTest extends TestCase
      * the affected order must remain visible.
      */
     #[Test]
-    public function отказ_платежа_после_полученных_денег_виден_в_сверке(): void
+    public function payment_failure_after_received_money_is_visible_in_reconciliation(): void
     {
         $order = $this->order(OrderStatus::Paid);
 
@@ -246,8 +246,8 @@ class ReconciliationTest extends TestCase
         $report = app(ReconciliationReport::class);
         $result = $report->build(60);
 
-        $this->assertSame(1, $result['checks']['payments_reversed']['count'], 'Два события по одному заказу — одна строка.');
-        $this->assertSame(129000, $result['checks']['payments_reversed']['amount_minor'], 'Сумма не должна удваиваться.');
+        $this->assertSame(1, $result['checks']['payments_reversed']['count'], 'Two events for one order must produce one row.');
+        $this->assertSame(129000, $result['checks']['payments_reversed']['amount_minor'], 'The amount must not be doubled.');
         $this->assertFalse($report->isHealthy($result));
     }
 
@@ -256,7 +256,7 @@ class ReconciliationTest extends TestCase
      * not make reconciliation unhealthy under normal operation.
      */
     #[Test]
-    public function протухший_отказ_не_считается_убытком(): void
+    public function stale_failure_is_not_counted_as_loss(): void
     {
         $order = $this->order(OrderStatus::Created, paidSecondsAgo: null);
 
@@ -290,7 +290,7 @@ class ReconciliationTest extends TestCase
      * signal designed for that condition.
      */
     #[Test]
-    public function прогон_из_одной_досверки_тратит_бюджет(): void
+    public function reconciliation_only_run_consumes_budget(): void
     {
         $order = $this->order(OrderStatus::DeliveryFailed, paidSecondsAgo: 3600);
 
@@ -317,7 +317,7 @@ class ReconciliationTest extends TestCase
     }
 
     #[Test]
-    public function полученный_но_не_зафиксированный_код_виден_в_сверке(): void
+    public function received_but_uncommitted_code_is_visible_in_reconciliation(): void
     {
         $order = $this->order(OrderStatus::Delivering, paidSecondsAgo: 3600);
 
@@ -340,7 +340,7 @@ class ReconciliationTest extends TestCase
     }
 
     #[Test]
-    public function отчёт_не_раскрывает_коды_товара(): void
+    public function report_does_not_expose_product_codes(): void
     {
         $order = $this->order(OrderStatus::Paid);
         $this->supplier->script(SupplierId::A, [SupplierResponse::ok('SECRET-CODE-42', 200, 5)]);
@@ -356,7 +356,7 @@ class ReconciliationTest extends TestCase
      * order. The report exposes them without becoming unhealthy under normal load.
      */
     #[Test]
-    public function несколько_успешных_платежей_показываются_но_не_гасят_зелёный_статус(): void
+    public function multiple_successful_payments_are_shown_without_failing_health_status(): void
     {
         $order = $this->order(OrderStatus::Created, paidSecondsAgo: null);
 
@@ -374,23 +374,39 @@ class ReconciliationTest extends TestCase
         $report = app(ReconciliationReport::class);
         $result = $report->build(60);
 
-        $this->assertSame(1, $result['checks']['duplicate_payments']['count'], 'Заказ обязан быть виден.');
+        $this->assertSame(1, $result['checks']['duplicate_payments']['count'], 'The order must be visible.');
         $this->assertTrue($result['checks']['duplicate_payments']['informational']);
-        $this->assertTrue($report->isHealthy($result), 'Информационный сигнал не гасит зелёный статус.');
+        $this->assertTrue($report->isHealthy($result), 'An informational signal must not fail the health status.');
     }
 
     /**
      * Resolved discrepancies must leave the report so later incidents remain visible.
      */
     #[Test]
-    public function разобранный_осиротевший_код_перестаёт_держать_сверку_красной(): void
+    public function resolved_orphaned_code_stops_failing_reconciliation(): void
     {
-        $order = $this->order(OrderStatus::Delivered);
+        // Real scenario: the order was delivered normally with a delivery row and
+        // ledger entries, while a second run returned an extra code that lost the race.
+        $order = $this->order(OrderStatus::Paid);
+        $this->supplier->script(SupplierId::A, [SupplierResponse::ok('WINNING-CODE', 200, 5)]);
+        app(FulfilOrder::class)->handle($order->id);
+        $this->assertSame(OrderStatus::Delivered, $order->refresh()->status);
+
+        app(PostTransaction::class)->handle(
+            lines: [
+                LedgerLine::debit(Account::Cash, $order->amount_minor),
+                LedgerLine::credit(Account::CustomerLiability, $order->amount_minor),
+            ],
+            currency: $order->currency,
+            refType: 'payment_event',
+            refId: 'evt_for_orphan',
+            orderId: $order->id,
+        );
 
         $attempt = DeliveryAttempt::create([
             'order_id' => $order->id,
-            'supplier' => 'a',
-            'request_id' => "req_{$order->public_id}_a_1",
+            'supplier' => 'b',
+            'request_id' => "req_{$order->public_id}_b_1",
             'attempt_no' => 1,
             'tries' => 1,
             'status' => AttemptStatus::Succeeded,
@@ -402,7 +418,7 @@ class ReconciliationTest extends TestCase
         $orphan = OrphanedCode::create([
             'order_id' => $order->id,
             'delivery_attempt_id' => $attempt->id,
-            'supplier' => 'a',
+            'supplier' => 'b',
             'code' => 'ORPHAN-CODE',
             'reason' => 'lost_delivery_race',
         ]);
@@ -412,7 +428,7 @@ class ReconciliationTest extends TestCase
         $this->assertFalse($report->isHealthy($report->build(60)));
 
         $this->postJson("/api/v1/ops/orphaned-codes/{$orphan->id}/resolve", [
-            'resolution' => 'ключ возвращён в пул поставщика',
+            'resolution' => 'code returned to supplier pool',
         ])->assertOk();
 
         $after = $report->build(60);
@@ -420,12 +436,12 @@ class ReconciliationTest extends TestCase
         $this->assertTrue($report->isHealthy($after));
 
         $this->postJson("/api/v1/ops/orphaned-codes/{$orphan->id}/resolve", [
-            'resolution' => 'ещё раз',
+            'resolution' => 'again',
         ])->assertStatus(409);
     }
 
     #[Test]
-    public function разбор_без_описания_отвергается(): void
+    public function resolution_without_description_is_rejected(): void
     {
         $order = $this->order(OrderStatus::Delivered);
         $attempt = DeliveryAttempt::create([
@@ -450,7 +466,7 @@ class ReconciliationTest extends TestCase
      * starve valid webhooks that arrived before their orders.
      */
     #[Test]
-    public function метёлка_реплея_не_забивается_вечными_событиями(): void
+    public function replay_sweep_is_not_starved_by_permanent_events(): void
     {
         $window = (int) config('ggsell.recovery.replay_window_hours');
 

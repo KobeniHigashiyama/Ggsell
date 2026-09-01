@@ -11,16 +11,16 @@ use Illuminate\Support\Facades\DB;
 class CatalogSeeder extends Seeder
 {
     private const PRODUCTS = [
-        ['STEAM-TOPUP-500', 'Пополнение Steam 500 ₽', 'topup', 500, 'assets/steam.png'],
-        ['STEAM-TOPUP-1000', 'Пополнение Steam 1000 ₽', 'topup', 1000, 'assets/steam.png'],
-        ['STEAM-TOPUP-2500', 'Пополнение Steam 2500 ₽', 'topup', 2500, 'assets/steam.png'],
-        ['KEY-CS2-PRIME', 'CS2 Prime Status ключ', 'key', 1290, 'assets/cs2.png'],
-        ['KEY-GTA5', 'GTA V ключ активации', 'key', 1990, 'assets/gta5.png'],
-        ['KEY-EFT', 'Escape from Tarkov ключ', 'key', 3490, 'assets/eft.png'],
-        ['SUB-DISCORD-1M', 'Discord Nitro 1 месяц', 'subscription', 399, 'assets/discord.png'],
-        ['SUB-YT-3M', 'YouTube Premium 3 месяца', 'subscription', 1490, 'assets/youtube.png'],
-        ['SUB-SPOTIFY-1M', 'Spotify Premium 1 месяц', 'subscription', 299, 'assets/spotify.png'],
-        ['GIFT-PSN-1000', 'PlayStation Store карта 1000 ₽', 'giftcard', 1000, 'assets/psn.png'],
+        ['STEAM-TOPUP-500', 'Steam Wallet Top-Up 500 RUB', 'topup', 500, 'assets/steam.png'],
+        ['STEAM-TOPUP-1000', 'Steam Wallet Top-Up 1000 RUB', 'topup', 1000, 'assets/steam.png'],
+        ['STEAM-TOPUP-2500', 'Steam Wallet Top-Up 2500 RUB', 'topup', 2500, 'assets/steam.png'],
+        ['KEY-CS2-PRIME', 'CS2 Prime Status Key', 'key', 1290, 'assets/cs2.png'],
+        ['KEY-GTA5', 'GTA V Activation Key', 'key', 1990, 'assets/gta5.png'],
+        ['KEY-EFT', 'Escape from Tarkov Key', 'key', 3490, 'assets/eft.png'],
+        ['SUB-DISCORD-1M', 'Discord Nitro 1 Month', 'subscription', 399, 'assets/discord.png'],
+        ['SUB-YT-3M', 'YouTube Premium 3 Months', 'subscription', 1490, 'assets/youtube.png'],
+        ['SUB-SPOTIFY-1M', 'Spotify Premium 1 Month', 'subscription', 299, 'assets/spotify.png'],
+        ['GIFT-PSN-1000', 'PlayStation Store Gift Card 1000 RUB', 'giftcard', 1000, 'assets/psn.png'],
         ['GIFT-XBOX-1500', 'Xbox Gift Card 1500 ₽', 'giftcard', 1500, 'assets/xbox.png'],
         ['GIFT-ROBLOX-800', 'Roblox 800 Robux', 'giftcard', 890, 'assets/roblox.png'],
     ];
@@ -65,6 +65,6 @@ class CatalogSeeder extends Seeder
             ]], ['sku'], ['updated_at']);
         }
 
-        $this->command?->info('Каталог: '.count(self::PRODUCTS).' SKU.');
+        $this->command?->info('Catalog: '.count(self::PRODUCTS).' SKUs.');
     }
 }

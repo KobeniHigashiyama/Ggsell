@@ -48,7 +48,7 @@ class SupplierFallbackTest extends TestCase
     }
 
     #[Test]
-    public function при_определённом_отказе_поставщика_a_товар_выдаёт_b_ровно_один_раз(): void
+    public function supplier_b_delivers_exactly_once_after_supplier_a_definitively_rejects(): void
     {
         $order = $this->paidOrder();
 
@@ -74,7 +74,7 @@ class SupplierFallbackTest extends TestCase
     }
 
     #[Test]
-    public function пустой_остаток_даёт_восстановимое_состояние_а_не_падение(): void
+    public function empty_stock_produces_recoverable_state_instead_of_failure(): void
     {
         $order = $this->paidOrder();
 
@@ -94,7 +94,7 @@ class SupplierFallbackTest extends TestCase
     }
 
     #[Test]
-    public function после_пополнения_остатка_заказ_доводится_до_выдачи_без_задвоения(): void
+    public function replenished_stock_allows_delivery_without_duplication(): void
     {
         $order = $this->paidOrder();
 
@@ -117,7 +117,7 @@ class SupplierFallbackTest extends TestCase
     }
 
     #[Test]
-    public function повторный_прогон_по_выданному_заказу_ничего_не_делает(): void
+    public function repeated_run_for_delivered_order_does_nothing(): void
     {
         $order = $this->paidOrder();
         $this->supplier->script(SupplierId::A, [SupplierResponse::ok('CODE-ONCE', 200, 7)]);
@@ -130,7 +130,7 @@ class SupplierFallbackTest extends TestCase
 
         $this->assertDatabaseCount('deliveries', 1);
         $this->assertDatabaseCount('delivery_attempts', 1);
-        $this->assertCount($callsAfterFirst, $this->supplier->calls, 'Выданный заказ не должен обращаться к поставщику.');
+        $this->assertCount($callsAfterFirst, $this->supplier->calls, 'A delivered order must not contact a supplier.');
         $this->assertLedgerBalanced();
     }
 
@@ -142,7 +142,7 @@ class SupplierFallbackTest extends TestCase
      * the product and allow the API to expose its code.
      */
     #[Test]
-    public function фиксация_выдачи_доводит_до_delivered_даже_из_out_of_stock(): void
+    public function committing_delivery_reaches_delivered_even_from_out_of_stock(): void
     {
         $order = $this->paidOrder();
         $order->forceFill(['status' => OrderStatus::OutOfStock, 'failure_reason' => 'out_of_stock'])->save();
@@ -175,7 +175,7 @@ class SupplierFallbackTest extends TestCase
      * A failed transition must roll back both the delivery row and revenue entry.
      */
     #[Test]
-    public function фиксация_выдачи_по_неоплаченному_заказу_откатывается(): void
+    public function committing_delivery_for_unpaid_order_is_rolled_back(): void
     {
         $order = $this->paidOrder();
         $order->forceFill(['status' => OrderStatus::Created, 'paid_at' => null])->save();
@@ -208,7 +208,7 @@ class SupplierFallbackTest extends TestCase
      * attempt exists, or one paid order could consume two keys.
      */
     #[Test]
-    public function параллельный_прогон_не_открывает_вторую_попытку(): void
+    public function concurrent_run_does_not_open_second_attempt(): void
     {
         $order = $this->paidOrder();
 

@@ -52,7 +52,7 @@ class TimeoutTrapTest extends TestCase
     }
 
     #[Test]
-    public function повтор_после_таймаута_идёт_с_тем_же_request_id_и_не_создаёт_вторую_выдачу(): void
+    public function retry_after_timeout_reuses_request_id_without_second_delivery(): void
     {
         $order = $this->paidOrder();
         $requestId = "req_{$order->public_id}_a_1";
@@ -77,7 +77,7 @@ class TimeoutTrapTest extends TestCase
     }
 
     #[Test]
-    public function неразрешённый_таймаут_запрещает_фолбэк_на_другого_поставщика(): void
+    public function unresolved_timeout_prevents_fallback_to_another_supplier(): void
     {
         $order = $this->paidOrder();
 
@@ -102,11 +102,11 @@ class TimeoutTrapTest extends TestCase
 
         $attempt = DeliveryAttempt::query()->sole();
         $this->assertSame(AttemptStatus::Unknown, $attempt->status);
-        $this->assertNull($attempt->finished_at, 'Подвешенная попытка не завершена и это должно быть видно в данных.');
+        $this->assertNull($attempt->finished_at, 'An unresolved attempt must remain visibly unfinished.');
     }
 
     #[Test]
-    public function досверка_подвешенной_попытки_выдаёт_тот_же_код_а_не_новый(): void
+    public function reconciling_unresolved_attempt_delivers_same_code_instead_of_new_one(): void
     {
         $order = $this->paidOrder();
         $requestId = "req_{$order->public_id}_a_1";
@@ -146,7 +146,7 @@ class TimeoutTrapTest extends TestCase
      * supplier may still hold an issued key, so fallback remains unsafe.
      */
     #[Test]
-    public function транспортный_сбой_на_повторе_не_открывает_дорогу_фолбэку(): void
+    public function transport_failure_during_retry_does_not_enable_fallback(): void
     {
         $order = $this->paidOrder();
 
@@ -171,7 +171,7 @@ class TimeoutTrapTest extends TestCase
         $this->assertSame(
             [SupplierId::A->value, SupplierId::A->value],
             array_column($this->supplier->calls, 'supplier'),
-            'К поставщику B не должно быть ни одного обращения.',
+            'Supplier B must not receive any requests.',
         );
     }
 
@@ -183,7 +183,7 @@ class TimeoutTrapTest extends TestCase
      * from creating a new request_id and consuming another key.
      */
     #[Test]
-    public function незафиксированная_выдача_доводится_без_обращения_к_поставщику(): void
+    public function uncommitted_delivery_is_recovered_without_contacting_supplier(): void
     {
         $order = $this->paidOrder();
 
@@ -210,7 +210,7 @@ class TimeoutTrapTest extends TestCase
         $this->assertSame('CODE-BEFORE-CRASH', $order->delivery->code);
         $this->assertDatabaseCount('deliveries', 1);
 
-        $this->assertSame([], $this->supplier->calls, 'Код уже в базе, спрашивать поставщика незачем.');
+        $this->assertSame([], $this->supplier->calls, 'The code is already stored, so no supplier call is needed.');
         $this->assertDatabaseCount('delivery_attempts', 1);
         $this->assertSame($attempt->id, Delivery::query()->sole()->delivery_attempt_id);
 
@@ -225,7 +225,7 @@ class TimeoutTrapTest extends TestCase
      * the attempt and permit fallback.
      */
     #[Test]
-    public function транспортный_сбой_на_досверке_не_закрывает_попытку_в_pending(): void
+    public function reconciliation_transport_failure_does_not_close_pending_attempt(): void
     {
         $order = $this->paidOrder();
 
@@ -251,7 +251,7 @@ class TimeoutTrapTest extends TestCase
         $this->assertSame(
             [SupplierId::A->value],
             array_column($this->supplier->calls, 'supplier'),
-            'К поставщику B обращаться нельзя: исход у A не выяснен.',
+            'Supplier B cannot be contacted while supplier A remains unresolved.',
         );
     }
 
@@ -262,7 +262,7 @@ class TimeoutTrapTest extends TestCase
      * would leave the order in delivering and make the scheduler retry forever.
      */
     #[Test]
-    public function невозможность_зафиксировать_код_переводит_заказ_в_отказ(): void
+    public function inability_to_commit_code_transitions_order_to_failure(): void
     {
         $other = $this->paidOrder();
         $this->supplier->script(SupplierId::A, [SupplierResponse::ok('SHARED-CODE', 200, 5)]);

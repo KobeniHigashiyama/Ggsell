@@ -14,7 +14,7 @@ use PHPUnit\Framework\TestCase;
 class PostTransactionTest extends TestCase
 {
     #[Test]
-    public function несходящаяся_операция_отвергается_до_обращения_к_базе(): void
+    public function unbalanced_transaction_is_rejected_before_database_access(): void
     {
         $this->expectException(DomainException::class);
         $this->expectExceptionMessageMatches('/imbalance/');
@@ -33,7 +33,7 @@ class PostTransactionTest extends TestCase
     }
 
     #[Test]
-    public function операция_из_одной_стороны_отвергается(): void
+    public function single_sided_transaction_is_rejected(): void
     {
         $this->expectException(DomainException::class);
 

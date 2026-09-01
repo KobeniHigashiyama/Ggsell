@@ -11,13 +11,13 @@ class ReplayPendingEventsCommand extends Command
 {
     protected $signature = 'payments:replay {--limit=200}';
 
-    protected $description = 'Применить платёжные события, принятые раньше, чем появился их заказ';
+    protected $description = 'Apply payment events received before their orders existed';
 
     public function handle(ReplayPendingEvents $replayPendingEvents): int
     {
         $applied = $replayPendingEvents->sweep((int) $this->option('limit'));
 
-        $this->components->info("Применено событий: {$applied}.");
+        $this->components->info("Applied events: {$applied}.");
 
         return self::SUCCESS;
     }

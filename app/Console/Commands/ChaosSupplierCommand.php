@@ -19,11 +19,11 @@ use Illuminate\Support\Facades\Cache;
 class ChaosSupplierCommand extends Command
 {
     protected $signature = 'chaos:supplier
-        {supplier : a или b}
+        {supplier : a or b}
         {mode : ok | error | timeout | out_of_stock | random}
-        {--ttl=600 : на сколько секунд закрепить режим}';
+        {--ttl=600 : number of seconds to keep the mode active}';
 
-    protected $description = 'Заставить поставщика-заглушку вести себя определённым образом';
+    protected $description = 'Force a supplier stub to use a specific behavior';
 
     public function handle(): int
     {
@@ -31,20 +31,20 @@ class ChaosSupplierCommand extends Command
         $mode = (string) $this->argument('mode');
 
         if (! array_key_exists($supplier, (array) config('ggsell.stubs'))) {
-            $this->components->error("Неизвестный поставщик: {$supplier}.");
+            $this->components->error("Unknown supplier: {$supplier}.");
 
             return self::FAILURE;
         }
 
         if ($mode === 'random') {
             Cache::forget(SupplierIssueController::overrideKey($supplier));
-            $this->components->info("Поставщик {$supplier} возвращён к случайному поведению.");
+            $this->components->info("Supplier {$supplier} restored to random behavior.");
 
             return self::SUCCESS;
         }
 
         if (ChaosMode::tryFrom($mode) === null) {
-            $this->components->error("Неизвестный режим: {$mode}.");
+            $this->components->error("Unknown mode: {$mode}.");
 
             return self::FAILURE;
         }
@@ -56,7 +56,7 @@ class ChaosSupplierCommand extends Command
         );
 
         $this->components->info(sprintf(
-            'Поставщик %s переведён в режим %s на %d с.',
+            'Supplier %s switched to %s mode for %d seconds.',
             $supplier, $mode, (int) $this->option('ttl'),
         ));
 

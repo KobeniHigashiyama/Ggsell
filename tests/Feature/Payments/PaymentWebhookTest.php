@@ -52,7 +52,7 @@ class PaymentWebhookTest extends TestCase
     }
 
     #[Test]
-    public function оплата_переводит_заказ_в_paid_и_ставит_выдачу_в_очередь(): void
+    public function payment_transitions_order_to_paid_and_queues_delivery(): void
     {
         $order = $this->makeOrder();
 
@@ -77,7 +77,7 @@ class PaymentWebhookTest extends TestCase
     }
 
     #[Test]
-    public function повторный_вебхук_с_тем_же_event_id_ничего_не_меняет(): void
+    public function repeated_webhook_with_same_event_id_changes_nothing(): void
     {
         $order = $this->makeOrder();
         $payload = $this->webhook(['order_id' => $order->public_id]);
@@ -93,14 +93,14 @@ class PaymentWebhookTest extends TestCase
 
         $order->refresh();
 
-        $this->assertSame(1, PaymentEvent::query()->count(), 'Повторы не должны создавать новых событий.');
-        $this->assertEquals($paidAt, $order->paid_at, 'Повтор не должен переписывать момент оплаты.');
+        $this->assertSame(1, PaymentEvent::query()->count(), 'Retries must not create new events.');
+        $this->assertEquals($paidAt, $order->paid_at, 'A retry must not overwrite the payment time.');
         $this->assertSame(1, DB::table('ledger_entries')->where('ref_id', 'evt_test_1')->where('account', 'cash')->count());
         $this->assertLedgerBalanced();
     }
 
     #[Test]
-    public function вебхук_пришедший_раньше_заказа_применяется_при_его_появлении(): void
+    public function webhook_received_before_order_is_applied_when_order_appears(): void
     {
         $publicId = 'ord_'.strtolower((string) Str::ulid());
 
@@ -111,7 +111,7 @@ class PaymentWebhookTest extends TestCase
             ->assertJson(['outcome' => 'pending_order']);
 
         $event = PaymentEvent::query()->sole();
-        $this->assertNull($event->processed_at, 'Непринятое событие обязано остаться в очереди на реплей.');
+        $this->assertNull($event->processed_at, 'An unapplied event must remain queued for replay.');
 
         $order = Order::create([
             'public_id' => $publicId,
@@ -130,7 +130,7 @@ class PaymentWebhookTest extends TestCase
     }
 
     #[Test]
-    public function неудачная_оплата_закрывает_заказ_без_денежных_проводок(): void
+    public function failed_payment_closes_order_without_ledger_entries(): void
     {
         $order = $this->makeOrder();
 
@@ -145,7 +145,7 @@ class PaymentWebhookTest extends TestCase
     }
 
     #[Test]
-    public function протухшее_событие_не_откатывает_состояние(): void
+    public function stale_event_does_not_revert_state(): void
     {
         $order = $this->makeOrder();
 
@@ -167,7 +167,7 @@ class PaymentWebhookTest extends TestCase
     }
 
     #[Test]
-    public function несовпадение_суммы_не_запускает_выдачу(): void
+    public function amount_mismatch_does_not_start_delivery(): void
     {
         $order = $this->makeOrder();
 
@@ -182,7 +182,7 @@ class PaymentWebhookTest extends TestCase
     }
 
     #[Test]
-    public function сумма_с_копейками_переводится_округлением_а_не_отбрасыванием(): void
+    public function fractional_amount_is_rounded_instead_of_truncated(): void
     {
         // 1290.35 is slightly lower as a double, so naive integer casting after
         // multiplication yields 129034. This distinguishes rounding from casting.
@@ -205,7 +205,7 @@ class PaymentWebhookTest extends TestCase
     }
 
     #[Test]
-    public function мусорная_сумма_отвергается_валидацией(): void
+    public function malformed_amount_is_rejected_by_validation(): void
     {
         $order = $this->makeOrder();
 
@@ -221,7 +221,7 @@ class PaymentWebhookTest extends TestCase
     }
 
     #[Test]
-    public function отказ_с_несовпавшей_суммой_всё_равно_закрывает_заказ(): void
+    public function failure_with_mismatched_amount_still_closes_order(): void
     {
         $order = $this->makeOrder();
 
@@ -236,7 +236,7 @@ class PaymentWebhookTest extends TestCase
     }
 
     #[Test]
-    public function неизвестная_валюта_отвергается_на_входе(): void
+    public function unknown_currency_is_rejected_at_boundary(): void
     {
         $order = $this->makeOrder();
 

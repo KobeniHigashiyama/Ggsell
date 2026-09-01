@@ -17,11 +17,11 @@ use Illuminate\Support\Facades\DB;
 class SeedLoadCatalogCommand extends Command
 {
     protected $signature = 'catalog:seed-load
-        {--skus=50000 : сколько SKU сгенерировать}
-        {--keys-per-sku=4 : сколько ключей на SKU у каждого поставщика}
+        {--skus=50000 : number of SKUs to generate}
+        {--keys-per-sku=4 : keys per SKU for each supplier}
         {--chunk=2000}';
 
-    protected $description = 'Наполнить каталог и пулы поставщиков объёмом, на котором виден план выполнения';
+    protected $description = 'Seed enough catalog and supplier data to inspect query plans';
 
     private const TYPES = ['topup', 'key', 'subscription', 'giftcard'];
 
@@ -32,7 +32,7 @@ class SeedLoadCatalogCommand extends Command
         $chunk = (int) $this->option('chunk');
         $now = now();
 
-        $this->components->info("Генерация {$total} SKU…");
+        $this->components->info("Generating {$total} SKUs...");
         $bar = $this->output->createProgressBar($total);
 
         for ($offset = 0; $offset < $total; $offset += $chunk) {
@@ -48,7 +48,7 @@ class SeedLoadCatalogCommand extends Command
 
                 $products[] = [
                     'sku' => $sku,
-                    'name' => "Нагрузочный товар {$n}",
+                    'name' => "Load-test product {$n}",
                     'type' => $type,
                     'price_minor' => (100 + ($n * 37) % 490000),
                     'currency' => 'RUB',
@@ -94,7 +94,7 @@ class SeedLoadCatalogCommand extends Command
         $bar->finish();
         $this->newLine(2);
 
-        $this->components->task('Пересчёт проекции остатков', function (): void {
+        $this->components->task('Refreshing stock projection', function (): void {
             DB::statement(<<<'SQL'
                 UPDATE product_stock ps
                 SET available_count = COALESCE(agg.available, 0), refreshed_at = now(), updated_at = now()
@@ -120,7 +120,7 @@ class SeedLoadCatalogCommand extends Command
         });
 
         $this->components->info(sprintf(
-            'Каталог: %s SKU, ключей: %s.',
+            'Catalog: %s SKUs, keys: %s.',
             number_format((float) DB::table('products')->count(), 0, '.', ' '),
             number_format((float) DB::table('stub.supplier_keys')->count(), 0, '.', ' '),
         ));

@@ -39,7 +39,7 @@ class SupplierKeySeeder extends Seeder
         ));
 
         if ($skus === []) {
-            $this->command?->warn('Базовый каталог пуст, пул ключей не наполнен.');
+            $this->command?->warn('The base catalog is empty; supplier pools were not seeded.');
 
             return;
         }
@@ -72,7 +72,7 @@ class SupplierKeySeeder extends Seeder
 
         $this->refreshProjection($skus);
 
-        $this->command?->info('Пулы поставщиков: '.count($rows).' ключей.');
+        $this->command?->info('Supplier pools: '.count($rows).' keys.');
     }
 
     /**

@@ -1,275 +1,228 @@
-# GgSell — ядро магазина цифровых товаров
+# GgSell Digital Goods Backend
 
-Бэкенд-ядро площадки цифровых товаров: каталог, заказы, приём платёжных вебхуков
-и автоматическая выдача кодов через поставщиков-заглушек.
+Backend core for a digital-goods marketplace. It provides a catalog, order
+creation, payment webhooks, supplier integrations, automatic code delivery,
+reconciliation, and recovery workflows.
 
-Задача решена вокруг трёх свойств, которые нельзя получить аккуратностью кода и
-приходится закладывать в схему данных: **однократность выдачи под гонками**,
-**безопасный повтор после таймаута** и **сходимость денежного журнала**.
+The design centers on three guarantees that must be enforced by data and
+transactions rather than application conventions:
 
-Стек: PHP 8.5, Laravel 13, PostgreSQL 17, nginx + php-fpm, очередь на Postgres.
+- exactly-once delivery under concurrent requests;
+- safe retries after an ambiguous supplier timeout;
+- a balanced financial ledger tied to order state.
 
----
+Stack: PHP 8.5, Laravel 13, PostgreSQL 17, nginx, PHP-FPM, and a PostgreSQL-backed
+queue.
 
-## Быстрый старт
+## Quick Start
 
 ```bash
-cp .env.example .env                  # уже настроен на docker-сеть
+cp .env.example .env
 docker compose up -d --build
 docker compose exec app composer install
 docker compose exec app php artisan key:generate
 docker compose exec app php artisan migrate --seed
 ```
 
-API поднимется на `http://localhost:8000`, Postgres — на `localhost:55432`.
-
-Проверка:
+The API is available at `http://localhost:8000`. PostgreSQL is exposed on
+`localhost:55432`.
 
 ```bash
 curl -s 'http://localhost:8000/api/v1/products?limit=3'
 ```
 
-Контейнеры: `web` (nginx), `app` (php-fpm), `worker` (очередь выдачи),
-`scheduler` (восстановление и сверка), `postgres`.
+Containers:
 
----
+- `web`: nginx;
+- `app`: PHP-FPM;
+- `worker`: delivery queue;
+- `scheduler`: recovery and reconciliation;
+- `postgres`: application and test databases.
 
 ## API
 
-| Метод | Путь | Назначение |
+| Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/v1/products` | Витрина с остатками, keyset-пагинация (`type`, `in_stock`, `cursor`, `limit`) |
-| `POST` | `/api/v1/orders` | Создать заказ по SKU. Принимает `Idempotency-Key` |
-| `GET` | `/api/v1/orders/{order_id}` | Заказ. Код возвращается только в статусе `delivered` |
-| `POST` | `/api/v1/webhooks/payment` | Вебхук платёжной системы (контракт из задания) |
-| `GET` | `/api/v1/ops/reconciliation` | Отчёт сверки. `200` — сходится, `409` — расхождение |
-| `POST` | `/api/v1/ops/orders/{order_id}/redeliver` | Ручное дожатие заказа |
-| `POST` | `/api/suppliers/{a\|b}/issue` | Заглушка поставщика (контракт из задания) |
-| `GET` | `/api/suppliers/{a\|b}/stock` | Остатки поставщика |
+| `GET` | `/api/v1/products` | Storefront with stock and keyset pagination (`type`, `in_stock`, `cursor`, `limit`) |
+| `POST` | `/api/v1/orders` | Create an order by SKU; accepts `Idempotency-Key` |
+| `GET` | `/api/v1/orders/{order_id}` | Read an order; the code is returned only after delivery |
+| `POST` | `/api/v1/webhooks/payment` | Receive a payment webhook |
+| `GET` | `/api/v1/ops/reconciliation` | Return `200` when consistent or `409` on discrepancies |
+| `POST` | `/api/v1/ops/orders/{order_id}/redeliver` | Trigger manual order recovery |
+| `POST` | `/api/v1/ops/orphaned-codes/{id}/resolve` | Resolve an orphaned supplier code |
+| `POST` | `/api/suppliers/{a\|b}/issue` | Request a code from a supplier stub |
+| `GET` | `/api/suppliers/{a\|b}/stock` | Read supplier stock |
 
-Пример сквозного прохода:
+## End-to-End Example
 
 ```bash
-# 1. Заказ
+# 1. Create an order.
 ORDER=$(curl -s -X POST localhost:8000/api/v1/orders \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $(uuidgen)" \
   -d '{"sku":"KEY-CS2-PRIME"}' | jq -r .data.order_id)
 
-# 2. Оплата (эмуляция вебхука платёжки)
+# 2. Send a payment webhook.
 curl -s -X POST localhost:8000/api/v1/webhooks/payment \
   -H 'Content-Type: application/json' \
-  -d "{\"event_id\":\"evt_$RANDOM\",\"order_id\":\"$ORDER\",\"status\":\"paid\",
+  -d "{\"event_id\":\"evt_$RANDOM\",\"order_id\":\"$ORDER\",\"status\":\"paid\",\
        \"amount\":1290,\"currency\":\"RUB\",\"created_at\":\"$(date -Iseconds)\"}"
 
-# 3. Результат
-sleep 3 && curl -s localhost:8000/api/v1/orders/$ORDER | jq
+# 3. Read the result.
+sleep 3
+curl -s localhost:8000/api/v1/orders/$ORDER | jq
 ```
 
----
+## Reliability Scenarios
 
-## Воспроизведение проверок
-
-### 1. Гонки: 50 параллельных вебхуков по одному заказу
+### Concurrent Payment Webhooks
 
 ```bash
 docker compose exec app php artisan chaos:race --n=50 --mode=distinct
 docker compose exec app php artisan chaos:race --n=50 --mode=same
 ```
 
-`distinct` — пятьдесят **разных** `event_id` по одному заказу: дедуп по
-`event_id` их не отсекает, всё ложится на блокировку строки заказа.
-`same` — пятьдесят повторов одного события: проверяется сам дедуп.
+`distinct` sends different event IDs for one order, exercising order row
+serialization. `same` sends repeated copies of one event, exercising event
+deduplication. The command checks persisted facts rather than trusting HTTP
+responses:
 
-Команда создаёт заказ, стреляет залпом через `curl_multi` в настоящий HTTP,
-дожидается завершения выдачи и проверяет инварианты **по данным**, а не по
-ответам:
+- every event was recorded;
+- exactly one delivery exists;
+- exactly one supplier key was consumed;
+- exactly one payment event was applied;
+- ledger transactions balance;
+- customer liability reaches zero after delivery;
+- the order ends in `delivered`.
 
-```
-| Выдач по заказу                  | 1         | OK |
-| Ключей списано у поставщиков     | 1         | OK |
-| Событий "оплачено" применено     | 1         | OK |
-| Несходящихся проводок            | 0         | OK |
-| Сальдо обязательства (выдан → 0) | 0         | OK |
-| Статус заказа                    | delivered | OK |
-```
+Any invariant violation returns a non-zero exit code.
 
-Ненулевой код возврата при любом нарушении.
-
-### 2. Отказ поставщика и фолбэк
+### Supplier Failure and Fallback
 
 ```bash
-docker compose exec app php artisan chaos:supplier a error   # A отвечает 503
+docker compose exec app php artisan chaos:supplier a error
 docker compose exec app php artisan chaos:supplier b ok
-# создать заказ и оплатить (см. пример выше)
 ```
 
-Результат — две попытки, выдача одна:
+Create and pay for an order after setting these modes. Supplier A returns a
+definitive failure, supplier B delivers, and only one delivery is committed.
 
-```
- supplier | attempt_no |  status   |  error_reason  | http_status
-----------+------------+-----------+----------------+-------------
- a        |          1 | failed    | supplier_error |         503
- b        |          1 | succeeded |                |         200
-```
-
-### 3. Ловушка таймаута
+### Timeout Trap
 
 ```bash
 docker compose exec app php artisan chaos:supplier a timeout
-# создать заказ и оплатить
 ```
 
-В режиме `timeout` заглушка **сначала списывает ключ и регистрирует запрос**, и
-только потом зависает. То есть поставщик действительно выдал код, а ответ не
-дошёл — ровно тот случай, в котором наивный повтор приводит ко второй выдаче.
+In timeout mode, the stub consumes and records a key before delaying the
+response. The caller therefore cannot treat a timeout as rejection. Retries use
+the same `request_id`, causing the supplier to return the same code rather than
+issuing another one.
 
-Результат:
+Restore random behavior with:
 
-```
- supplier | attempt_no | tries |  status   | latency_ms |               request_id
-----------+------------+-------+-----------+------------+----------------------------------------
- a        |          1 |     2 | succeeded |         93 | req_ord_01m1cjbmqs6wdgv9kcb5m3z2nt_a_1
-
- ключей_списано: 1
+```bash
+docker compose exec app php artisan chaos:supplier a random
 ```
 
-Две сетевые попытки, **один** `request_id`, **одна** строка попытки, **один**
-списанный ключ. Повтор после таймаута — это не новый запрос, а переспрашивание
-того же.
-
-Вернуть заглушки к случайному поведению: `php artisan chaos:supplier a random`.
-
-### 4. Пустой остаток
+### Empty Stock
 
 ```bash
 docker compose exec app php artisan chaos:supplier a out_of_stock
 docker compose exec app php artisan chaos:supplier b out_of_stock
 ```
 
-Заказ переходит в `out_of_stock` — восстановимое состояние, не падение. После
-`chaos:supplier a ok` фоновое дожатие доводит его до `delivered` без задвоения.
+The order enters recoverable `out_of_stock` instead of failing permanently.
+After inventory is replenished, background recovery can reach `delivered`
+without duplicate delivery.
 
-### 5. Сверка
+### Reconciliation
 
 ```bash
 docker compose exec app php artisan orders:reconcile --grace=30
 curl -s 'localhost:8000/api/v1/ops/reconciliation?grace_seconds=30' | jq
 ```
 
----
+The report compares payment events, order state, deliveries, supplier attempts,
+orphaned codes, and ledger balances using a consistent database snapshot.
 
-## Тесты
+## Tests
 
 ```bash
-docker compose exec app php artisan test                        # всё, 66 тестов
-docker compose exec app php artisan test --testsuite=Unit       # машины состояний, журнал
-docker compose exec app php artisan test --testsuite=Feature    # критерии 2–6
-docker compose exec app php artisan test --testsuite=Integration # критерий 1, нужен поднятый стек
+docker compose exec app php artisan test
+docker compose exec app php artisan test --testsuite=Unit
+docker compose exec app php artisan test --testsuite=Feature
+docker compose exec app php artisan test --testsuite=Integration
 ```
 
-Тесты идут против **настоящего PostgreSQL** (`ggsell_test`), а не SQLite: всё,
-что здесь проверяется — блокировки строк, `SKIP LOCKED`, поведение при нарушении
-ограничений — в SQLite либо отсутствует, либо работает иначе.
+Tests use PostgreSQL rather than in-memory SQLite because row locks,
+`SKIP LOCKED`, partial indexes, and PostgreSQL constraint behavior are part of
+the implementation.
 
-Две оговорки, о которых стоит знать заранее:
+The `Integration` suite requires the running Docker stack. It targets the real
+HTTP endpoint through nginx and therefore uses the stack's application database.
+It creates real orders and consumes supplier-stub keys. Restore a clean state
+with:
 
-- Набор `Integration` требует **поднятого стека** и молча пропускается без него
-  (с явным предупреждением в выводе). Без `docker compose up` критерий 1 не
-  проверяется, хотя прогон остаётся зелёным.
-- Этот же набор ходит в **рабочую** базу `ggsell`, а не в тестовую: он
-  обстреливает настоящий HTTP-эндпоинт через nginx, а тот работает с рабочей
-  базой. Прогон тестов создаёт реальные заказы и списывает ключи из пулов
-  заглушек. Это сознательный размен: герметичность против того, чтобы проверка
-  гонок действительно проверяла гонки. Вернуть чистое состояние —
-  `php artisan migrate:fresh --seed`.
+```bash
+docker compose exec app php artisan migrate:fresh --seed
+```
 
-Соответствие критериям приёмки:
+Acceptance coverage:
 
-| Критерий | Где проверяется |
+| Requirement | Coverage |
 |---|---|
-| 1. 50 параллельных вебхуков → одна выдача | `chaos:race`, `tests/Integration/ParallelWebhookRaceTest` |
-| 2. Повтор `event_id` ничего не меняет | `PaymentWebhookTest::повторный_вебхук_...` |
-| 3. Вебхук вне порядка / раньше заказа | `PaymentWebhookTest::вебхук_пришедший_раньше_заказа_...`, `...протухшее_событие...` |
-| 4. Таймаут поставщика, который выдал код | `TimeoutTrapTest` (3 теста), `SupplierStubContractTest::режим_таймаута_...` |
-| 5. A недоступен → фолбэк на B, одна выдача | `SupplierFallbackTest::при_определённом_отказе_...` |
-| 6. Пустой остаток, восстановимое состояние | `SupplierFallbackTest::пустой_остаток_...`, `...после_пополнения_...` |
+| Fifty concurrent paid webhooks produce one delivery | `chaos:race`, `ParallelWebhookRaceTest` |
+| Repeated `event_id` changes nothing | `PaymentWebhookTest` |
+| Out-of-order or pre-order webhook is handled | `PaymentWebhookTest` |
+| Timeout after supplier issuance does not duplicate delivery | `TimeoutTrapTest`, `SupplierStubContractTest` |
+| Supplier A failure falls back to B exactly once | `SupplierFallbackTest` |
+| Empty stock creates a recoverable state | `SupplierFallbackTest` |
 
----
-
-## Каталог под нагрузкой
+## Catalog Load Test
 
 ```bash
 docker compose exec app php artisan catalog:seed-load --skus=50000 --keys-per-sku=4
 ```
 
-50 000 SKU и 400 000 ключей. Замеры на этом объёме — в
-[NOTES.md](NOTES.md#этап-5-каталог-под-нагрузкой).
+This creates 50,000 SKUs and 400,000 supplier keys. The storefront uses a narrow
+stock projection, keyset pagination, and partial covering indexes. Recorded
+plans and design details are documented in [NOTES.md](NOTES.md).
 
-Кратко: горячий запрос витрины — **0.69 мс**, `Index Only Scan`,
-`Heap Fetches: 0`, 105 буферов. Наивный вариант с `COUNT(*)` по пулу ключей и
-`OFFSET` — **164 мс** и 4471 буфер.
-
-Витрина «только в наличии» на распроданном на 95% каталоге: **0.38 мс** против
-**3.21 мс** у варианта с фильтром по счётчику в присоединяемой таблице, и
-стоимость второго растёт по мере распродажи, а первого — нет.
-
----
-
-## Полезные команды
+## Operational Commands
 
 ```bash
-php artisan orders:reconcile [--json] [--grace=60]  # сверка
-php artisan orders:resolve-stuck                    # дожать зависшие заказы
-php artisan payments:replay                         # применить события без заказа
-php artisan stock:refresh                           # обновить проекцию остатков
-php artisan chaos:race --n=50 --mode=distinct       # проверка гонок
-php artisan chaos:supplier a timeout                # режим заглушки
-php artisan catalog:seed-load --skus=50000          # нагрузочный каталог
+php artisan orders:reconcile [--json] [--grace=60]
+php artisan orders:resolve-stuck
+php artisan payments:replay
+php artisan stock:refresh
+php artisan chaos:race --n=50 --mode=distinct
+php artisan chaos:supplier a timeout
+php artisan catalog:seed-load --skus=50000
+php artisan ops:resolve-orphan --list
 ```
 
-Логи:
+Structured logs share a `correlation_id` across webhook receipt, payment
+application, queue processing, and supplier requests:
 
 ```bash
 docker compose exec app tail -f storage/logs/payments-$(date +%F).log
 docker compose exec app tail -f storage/logs/delivery-$(date +%F).log
 ```
 
-Структурированный JSON со сквозным `correlation_id`. Вся история заказа —
-приём вебхука, применение платежа, работа воркера, обращения к поставщикам —
-собирается одним grep по одному значению.
+## Time Spent
 
----
-
-## Затраченное время
-
-<!-- ЗАПОЛНИТЬ ПЕРЕД ОТПРАВКОЙ: задание требует этот пункт явно. -->
-
-| Этап | Часы |
+| Stage | Hours |
 |---|---|
-| 0. Инфраструктура (Docker, Postgres, схема) | |
-| 1–2. Ядро API и exactly-once | |
-| 3. Устойчивые интеграции и ловушка таймаута | |
-| 4. Сверка, журнал, восстановление | |
-| 5. Каталог под нагрузкой | |
-| Тесты, ревью, документация | |
-| **Итого** | |
+| Infrastructure and schema | |
+| API core and exactly-once behavior | |
+| Supplier resilience and timeout handling | |
+| Reconciliation, ledger, and recovery | |
+| Catalog load work | |
+| Tests, review, and documentation | |
+| **Total** | |
 
-## Состязательный ревью
+## Further Reading
 
-Решение прогнали через независимый разбор в три круга. Первый вскрыл два пути
-ко второй выдаче, три способа потерять платёж и несколько эксплуатационных
-дефектов. Второй разбирал уже сами исправления — и нашёл в них ещё пять
-дефектов, включая один, из-за которого сверка оставалась красной на штатных
-данных, и одно «исправление», сломавшее то, что чинило. Третий прошёл по всем
-шести критериям приёмки с независимой перепроверкой SQL и нашёл состояние, в
-котором оплаченный заказ навсегда оставался без товара и невидим для
-собственной сверки.
-
-Всё закрыто регрессионными тестами; для ключевых проверено, что тест краснеет
-при возврате бага. Разбор находок — в
-[NOTES.md](NOTES.md#состязательный-ревью-и-что-он-нашёл).
-
-## Что дальше
-
-Ключевые решения, их обоснование и план масштабирования — в [NOTES.md](NOTES.md).
+[NOTES.md](NOTES.md) explains the data invariants, concurrency model, timeout
+handling, reconciliation checks, performance decisions, review findings, and
+scaling plan.

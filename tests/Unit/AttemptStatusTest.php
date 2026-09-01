@@ -11,7 +11,7 @@ use PHPUnit\Framework\TestCase;
 class AttemptStatusTest extends TestCase
 {
     #[Test]
-    public function фолбэк_разрешён_только_после_определённого_отказа(): void
+    public function fallback_is_allowed_only_after_definitive_rejection(): void
     {
         $this->assertTrue(AttemptStatus::Failed->allowsFallback());
 
@@ -21,7 +21,7 @@ class AttemptStatusTest extends TestCase
     }
 
     #[Test]
-    public function неизвестный_исход_не_считается_выясненным(): void
+    public function unknown_outcome_is_not_considered_resolved(): void
     {
         $this->assertFalse(AttemptStatus::Unknown->isResolved());
         $this->assertFalse(AttemptStatus::Pending->isResolved());

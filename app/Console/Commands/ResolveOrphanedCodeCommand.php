@@ -12,12 +12,12 @@ use Illuminate\Console\Command;
 class ResolveOrphanedCodeCommand extends Command
 {
     protected $signature = 'ops:resolve-orphan
-        {id? : идентификатор строки orphaned_codes}
-        {--resolution= : что с кодом сделали}
-        {--by=ops : кто разобрал}
-        {--list : показать неразобранные и выйти}';
+        {id? : orphaned_codes row ID}
+        {--resolution= : action taken for the code}
+        {--by=ops : operator who resolved it}
+        {--list : list unresolved codes and exit}';
 
-    protected $description = 'Пометить осиротевший код разобранным, чтобы сверка перестала его показывать';
+    protected $description = 'Mark an orphaned code as resolved so reconciliation stops reporting it';
 
     public function handle(ResolveOrphanedCode $resolveOrphanedCode): int
     {
@@ -30,7 +30,7 @@ class ResolveOrphanedCodeCommand extends Command
         if ($resolution === '') {
             // A resolution without a description hides the outcome and makes
             // later incident analysis impossible.
-            $this->components->error('Укажите --resolution: что именно сделали с кодом.');
+            $this->components->error('Provide --resolution with the action taken for the code.');
 
             return self::FAILURE;
         }
@@ -47,7 +47,7 @@ class ResolveOrphanedCodeCommand extends Command
             return self::FAILURE;
         }
 
-        $this->components->info("Код #{$orphan->id} помечен разобранным.");
+        $this->components->info("Code #{$orphan->id} marked as resolved.");
 
         return self::SUCCESS;
     }
@@ -61,20 +61,20 @@ class ResolveOrphanedCodeCommand extends Command
             ->get(['id', 'order_id', 'supplier', 'reason', 'created_at']);
 
         if ($rows->isEmpty()) {
-            $this->components->info('Неразобранных осиротевших кодов нет.');
+            $this->components->info('No unresolved orphaned codes found.');
 
             return self::SUCCESS;
         }
 
         // Do not display the code even here; it remains a valid unused key.
         $this->table(
-            ['#', 'Заказ', 'Поставщик', 'Причина', 'Когда'],
+            ['#', 'Order', 'Supplier', 'Reason', 'Created'],
             $rows->map(fn (OrphanedCode $o): array => [
                 $o->id, $o->order_id, $o->supplier, $o->reason, $o->created_at,
             ])->all(),
         );
 
-        $this->line('  Разобрать: php artisan ops:resolve-orphan <#> --resolution="вернул в пул поставщика"');
+        $this->line('  Resolve: php artisan ops:resolve-orphan <#> --resolution="returned to supplier pool"');
 
         return self::SUCCESS;
     }

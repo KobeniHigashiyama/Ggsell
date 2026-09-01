@@ -33,7 +33,7 @@ class SupplierStubContractTest extends TestCase
     }
 
     #[Test]
-    public function повтор_с_тем_же_request_id_возвращает_тот_же_код(): void
+    public function repeated_request_id_returns_same_code(): void
     {
         $payload = ['request_id' => 'req_x_a_1', 'sku' => 'KEY-CS2-PRIME', 'order_id' => 'ord_x'];
 
@@ -51,7 +51,7 @@ class SupplierStubContractTest extends TestCase
     }
 
     #[Test]
-    public function режим_таймаута_списывает_ключ_до_того_как_зависнуть(): void
+    public function timeout_mode_consumes_key_before_hanging(): void
     {
         $payload = ['request_id' => 'req_timeout_a_1', 'sku' => 'KEY-CS2-PRIME', 'order_id' => 'ord_t'];
 
@@ -67,7 +67,7 @@ class SupplierStubContractTest extends TestCase
     }
 
     #[Test]
-    public function разные_request_id_получают_разные_ключи(): void
+    public function different_request_ids_receive_different_codes(): void
     {
         $codes = [];
 
@@ -79,11 +79,11 @@ class SupplierStubContractTest extends TestCase
             ])->assertOk()->json('code');
         }
 
-        $this->assertCount(5, array_unique($codes), 'Один ключ не может уйти в два заказа.');
+        $this->assertCount(5, array_unique($codes), 'One code cannot be assigned to two orders.');
     }
 
     #[Test]
-    public function пустой_пул_даёт_разборчивый_отказ_а_не_пятисотку(): void
+    public function empty_pool_returns_explicit_rejection_instead_of_server_error(): void
     {
         DB::table('stub.supplier_keys')->update(['status' => 'issued']);
 
@@ -93,7 +93,7 @@ class SupplierStubContractTest extends TestCase
     }
 
     #[Test]
-    public function режим_ошибки_не_списывает_ключ(): void
+    public function error_mode_does_not_consume_key(): void
     {
         $this->issue(
             ['request_id' => 'req_err_a_1', 'sku' => 'KEY-CS2-PRIME', 'order_id' => 'ord_err'],

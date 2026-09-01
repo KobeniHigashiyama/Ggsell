@@ -11,13 +11,13 @@ class RefreshStockCommand extends Command
 {
     protected $signature = 'stock:refresh';
 
-    protected $description = 'Обновить проекцию остатков витрины по данным поставщиков';
+    protected $description = 'Refresh the storefront stock projection from suppliers';
 
     public function handle(RefreshStockProjection $refreshStockProjection): int
     {
         $count = $refreshStockProjection->handle();
 
-        $this->components->info("Обновлено SKU: {$count}.");
+        $this->components->info("Updated SKUs: {$count}.");
 
         return self::SUCCESS;
     }
