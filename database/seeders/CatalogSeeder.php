@@ -21,7 +21,7 @@ class CatalogSeeder extends Seeder
         ['SUB-YT-3M', 'YouTube Premium 3 Months', 'subscription', 1490, 'assets/youtube.png'],
         ['SUB-SPOTIFY-1M', 'Spotify Premium 1 Month', 'subscription', 299, 'assets/spotify.png'],
         ['GIFT-PSN-1000', 'PlayStation Store Gift Card 1000 RUB', 'giftcard', 1000, 'assets/psn.png'],
-        ['GIFT-XBOX-1500', 'Xbox Gift Card 1500 ₽', 'giftcard', 1500, 'assets/xbox.png'],
+        ['GIFT-XBOX-1500', 'Xbox Gift Card 1500 RUB', 'giftcard', 1500, 'assets/xbox.png'],
         ['GIFT-ROBLOX-800', 'Roblox 800 Robux', 'giftcard', 890, 'assets/roblox.png'],
     ];
 

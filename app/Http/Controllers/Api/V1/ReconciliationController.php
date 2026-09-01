@@ -34,12 +34,6 @@ class ReconciliationController extends Controller
     }
 
     /**
-     * Manually retry order fulfilment.
-     *
-     * Use the same job as automatic delivery. A separate manual path would drift
-     * from the primary path and risk duplicate delivery during recovery.
-     */
-    /**
      * Mark an orphaned code as resolved.
      *
      * Reconciliation needs a resolution path. Otherwise resolved discrepancies
@@ -68,6 +62,14 @@ class ReconciliationController extends Controller
         ]);
     }
 
+    /**
+     * Manually retry order fulfilment.
+     *
+     * Uses the same job as automatic delivery. A separate manual path would
+     * drift from the primary one and duplicate deliveries exactly when someone
+     * reaches for it. The run budget is reset: it exists to stop a hopeless
+     * order from cycling in the background, not to lock a human out.
+     */
     public function redeliver(string $publicId): JsonResponse
     {
         $order = Order::query()->where('public_id', $publicId)->firstOrFail();

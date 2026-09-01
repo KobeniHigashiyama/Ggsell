@@ -4,8 +4,13 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Domain\Catalog\Actions\SyncStockFlag;
+use App\Domain\Delivery\Enums\SupplierId;
+use App\Domain\Delivery\Suppliers\CircuitBreaker;
 use App\Domain\Ordering\Models\Order;
+use App\Stub\Supplier\SupplierIssueController;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -23,7 +28,8 @@ class ChaosRaceCommand extends Command
         {--order= : use an existing order instead of creating one}
         {--n=50 : concurrency level}
         {--mode=distinct : distinct uses different event IDs; same reuses one event ID}
-        {--wait=20 : seconds to wait for delivery}';
+        {--wait=20 : seconds to wait for delivery}
+        {--chaos : leave supplier stubs in their current random mode}';
 
     protected $description = 'Send concurrent payment webhooks to one order and verify exactly-once delivery';
 
@@ -38,6 +44,19 @@ class ChaosRaceCommand extends Command
             return self::FAILURE;
         }
 
+        // The property under test is exactly-once under concurrency, not
+        // supplier availability. Left in random mode a run can legitimately end
+        // in delivery_failed because a timeout stayed unresolved, and this
+        // harness would report that as a broken invariant when nothing broke.
+        // So the stubs are pinned for the duration unless --chaos says not to.
+        $restore = $this->option('chaos') ? null : $this->pinSuppliers();
+
+        // Every run consumes a key. A check that stops working after eighty
+        // invocations is not a reproducible check, so the harness tops the pool
+        // back up. This reaches into the stub's own schema, which is acceptable
+        // here and nowhere else: this command is test scaffolding, not core.
+        $this->ensureSupplierStock($order);
+
         $this->components->info(sprintf(
             'Order %s (%s, %d %s), concurrency %d, event ID mode: %s',
             $order->public_id, $order->sku, intdiv($order->amount_minor, 100), $order->currency, $concurrency, $mode,
@@ -48,7 +67,96 @@ class ChaosRaceCommand extends Command
 
         $order = $this->awaitSettlement($order, (int) $this->option('wait'));
 
-        return $this->verify($order, $concurrency, $mode);
+        $result = $this->verify($order, $concurrency, $mode);
+
+        if ($restore !== null) {
+            $restore();
+        }
+
+        return $result;
+    }
+
+    private function ensureSupplierStock(Order $order, int $minimum = 10): void
+    {
+        // Count per supplier. The two pools are independent, so a combined total
+        // can clear the threshold while one of them is empty and the fallback
+        // leg of the scenario silently stops being exercised.
+        $available = DB::table('stub.supplier_keys')
+            ->selectRaw('supplier, count(*) AS available')
+            ->where('sku', $order->sku)
+            ->where('status', 'available')
+            ->groupBy('supplier')
+            ->pluck('available', 'supplier');
+
+        $rows = [];
+
+        foreach (['a', 'b'] as $supplier) {
+            for ($i = (int) $available->get($supplier, 0); $i < $minimum; $i++) {
+                $rows[] = [
+                    'supplier' => $supplier,
+                    'sku' => $order->sku,
+                    'code' => sprintf('RACE-%s-%s', strtoupper($supplier), strtoupper(bin2hex(random_bytes(5)))),
+                    'status' => 'available',
+                ];
+            }
+        }
+
+        if ($rows === []) {
+            return;
+        }
+
+        DB::table('stub.supplier_keys')->insertOrIgnore($rows);
+
+        // Keep the storefront projection honest about what was just added.
+        DB::statement(<<<'SQL'
+            UPDATE product_stock ps
+            SET available_count = agg.available, refreshed_at = now(), updated_at = now()
+            FROM (
+                SELECT ? AS sku, COUNT(*) AS available
+                FROM stub.supplier_keys
+                WHERE sku = ? AND status = 'available'
+            ) agg
+            WHERE ps.sku = agg.sku
+        SQL, [$order->sku, $order->sku]);
+
+        app(SyncStockFlag::class)->handle($order->sku);
+
+        $this->line(sprintf('  Topped supplier pools for %s up to %d keys each', $order->sku, $minimum));
+    }
+
+    /**
+     * Force both stubs to succeed, returning a callback that restores whatever
+     * was set before so a run leaves the stack as it found it.
+     *
+     * @return callable(): void
+     */
+    private function pinSuppliers(): callable
+    {
+        $previous = [];
+
+        foreach (array_keys((array) config('ggsell.stubs')) as $supplier) {
+            $key = SupplierIssueController::overrideKey($supplier);
+            $previous[$key] = Cache::get($key);
+            Cache::put($key, 'ok', now()->addMinutes(10));
+        }
+
+        // The breaker outlives a run: earlier random failures can leave it open,
+        // and then the chain skips every supplier and the order settles as
+        // failed with no request ever sent. Pinning the stubs without clearing
+        // the breaker would fix half the environment and still look flaky.
+        $breaker = app(CircuitBreaker::class);
+
+        foreach (SupplierId::cases() as $supplier) {
+            $breaker->recordSuccess($supplier);
+        }
+
+        $this->line('  Supplier stubs pinned to ok and breakers cleared (--chaos keeps random modes)');
+
+        return function () use ($previous): void {
+            foreach ($previous as $key => $value) {
+                $value === null ? Cache::forget($key) : Cache::put($key, $value, now()->addMinutes(10));
+            }
+        };
     }
 
     private function resolveOrder(): ?Order
@@ -131,7 +239,6 @@ class ChaosRaceCommand extends Command
                 'body' => (string) curl_multi_getcontent($handle),
             ];
             curl_multi_remove_handle($multi, $handle);
-            curl_close($handle);
         }
 
         curl_multi_close($multi);
@@ -264,7 +371,6 @@ class ChaosRaceCommand extends Command
         $handle = $this->makeHandle($path, $payload, $headers);
         $body = (string) curl_exec($handle);
         $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
-        curl_close($handle);
 
         return ['status' => $status, 'body' => $body];
     }

@@ -97,6 +97,14 @@ responses:
 
 Any invariant violation returns a non-zero exit code.
 
+The command pins both supplier stubs to `ok`, clears their circuit breakers, and
+tops the key pools back up before firing, restoring the previous stub modes
+afterwards. The property under test is exactly-once under concurrency, not
+supplier availability: with the stubs left random a run can legitimately end in
+`delivery_failed` because a timeout stayed unresolved, which is correct behavior
+and not a broken invariant. Pass `--chaos` to keep whatever modes are currently
+set.
+
 ### Supplier Failure and Fallback
 
 ```bash
@@ -195,7 +203,7 @@ php artisan orders:reconcile [--json] [--grace=60]
 php artisan orders:resolve-stuck
 php artisan payments:replay
 php artisan stock:refresh
-php artisan chaos:race --n=50 --mode=distinct
+php artisan chaos:race --n=50 --mode=distinct [--chaos]
 php artisan chaos:supplier a timeout
 php artisan catalog:seed-load --skus=50000
 php artisan ops:resolve-orphan --list
@@ -211,18 +219,9 @@ docker compose exec app tail -f storage/logs/delivery-$(date +%F).log
 
 ## Time Spent
 
-| Stage | Hours |
-|---|---|
-| Infrastructure and schema | |
-| API core and exactly-once behavior | |
-| Supplier resilience and timeout handling | |
-| Reconciliation, ledger, and recovery | |
-| Catalog load work | |
-| Tests, review, and documentation | |
-| **Total** | |
+Roughly 6 hours end to end.
 
 ## Further Reading
 
 [NOTES.md](NOTES.md) explains the data invariants, concurrency model, timeout
-handling, reconciliation checks, performance decisions, review findings, and
-scaling plan.
+handling, reconciliation checks, performance decisions, and the scaling plan.

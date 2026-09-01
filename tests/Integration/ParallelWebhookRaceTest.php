@@ -51,7 +51,20 @@ class ParallelWebhookRaceTest extends TestCase
             base_path(),
             // The command must use the running stack database because requests target
             // its real HTTP endpoint.
-            ['DB_DATABASE' => 'ggsell', 'APP_ENV' => 'local'],
+            [
+                // The subprocess must behave exactly like a normal CLI
+                // invocation against the running stack, not like a test.
+                // DB_DATABASE, because it drives the real HTTP endpoint and
+                // nginx talks to the application database. CACHE_STORE, because
+                // PHPUnit forces `array` on this process and the child would
+                // inherit it: pinning the supplier stubs would then land in an
+                // in-memory cache that PHP-FPM never reads, leaving the stubs
+                // in random mode and the check intermittently red for reasons
+                // that have nothing to do with concurrency.
+                'DB_DATABASE' => 'ggsell',
+                'APP_ENV' => 'local',
+                'CACHE_STORE' => 'database',
+            ],
             null,
             180,
         );
@@ -73,7 +86,6 @@ class ParallelWebhookRaceTest extends TestCase
         curl_setopt_array($handle, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 3]);
         curl_exec($handle);
         $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
-        curl_close($handle);
 
         return $status === 200;
     }
