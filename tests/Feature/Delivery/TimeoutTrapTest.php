@@ -40,22 +40,23 @@ class TimeoutTrapTest extends TestCase
 
     private function paidOrder(): Order
     {
-        return Order::create([
-            'public_id' => Order::newPublicId(),
-            'sku' => 'KEY-CS2-PRIME',
-            'quantity' => 1,
-            'amount_minor' => 129000,
-            'currency' => 'RUB',
+        return $this->makeOrder('KEY-CS2-PRIME', [
             'status' => OrderStatus::Paid,
             'paid_at' => now(),
         ]);
+    }
+
+    /** The request_id the orchestrator will build for the first attempt. */
+    private function firstRequestId(Order $order, SupplierId $supplier = SupplierId::A): string
+    {
+        return sprintf('req_%s_%s_1', $this->itemOf($order)->public_id, $supplier->value);
     }
 
     #[Test]
     public function retry_after_timeout_reuses_request_id_without_second_delivery(): void
     {
         $order = $this->paidOrder();
-        $requestId = "req_{$order->public_id}_a_1";
+        $requestId = $this->firstRequestId($order);
 
         $this->supplier
             ->script(SupplierId::A, [SupplierResponse::unknown('timeout', null, 2000)])
@@ -66,7 +67,7 @@ class TimeoutTrapTest extends TestCase
         $order->refresh();
 
         $this->assertSame(OrderStatus::Delivered, $order->status);
-        $this->assertSame('REAL-CODE-0001', $order->delivery->code);
+        $this->assertSame('REAL-CODE-0001', $this->deliveredCode($order));
 
         $this->assertDatabaseCount('deliveries', 1);
         $this->assertDatabaseCount('delivery_attempts', 1);
@@ -109,7 +110,7 @@ class TimeoutTrapTest extends TestCase
     public function reconciling_unresolved_attempt_delivers_same_code_instead_of_new_one(): void
     {
         $order = $this->paidOrder();
-        $requestId = "req_{$order->public_id}_a_1";
+        $requestId = $this->firstRequestId($order);
 
         $this->supplier->script(SupplierId::A, [
             SupplierResponse::unknown('timeout', null, 2000),
@@ -126,7 +127,7 @@ class TimeoutTrapTest extends TestCase
         $order->refresh();
 
         $this->assertSame(OrderStatus::Delivered, $order->status);
-        $this->assertSame('ISSUED-BEFORE-TIMEOUT', $order->delivery->code);
+        $this->assertSame('ISSUED-BEFORE-TIMEOUT', $this->deliveredCode($order));
         $this->assertDatabaseCount('deliveries', 1);
 
         $this->assertDatabaseCount('delivery_attempts', 1);
@@ -189,13 +190,17 @@ class TimeoutTrapTest extends TestCase
 
         $attempt = DeliveryAttempt::create([
             'order_id' => $order->id,
+            'order_item_id' => $this->itemOf($order)->id,
             'supplier' => SupplierId::A->value,
-            'request_id' => "req_{$order->public_id}_a_1",
+            'request_id' => $this->firstRequestId($order),
             'attempt_no' => 1,
             'tries' => 1,
             'status' => AttemptStatus::Succeeded,
             'http_status' => 200,
             'code' => 'CODE-BEFORE-CRASH',
+            // Stored alongside the code by applyResponse, so a later run can
+            // re-check what the supplier claimed it was for.
+            'reported_sku' => 'KEY-CS2-PRIME',
             'started_at' => now()->subMinute(),
             'finished_at' => now()->subMinute(),
         ]);
@@ -207,7 +212,7 @@ class TimeoutTrapTest extends TestCase
         $order->refresh();
 
         $this->assertSame(OrderStatus::Delivered, $order->status);
-        $this->assertSame('CODE-BEFORE-CRASH', $order->delivery->code);
+        $this->assertSame('CODE-BEFORE-CRASH', $this->deliveredCode($order));
         $this->assertDatabaseCount('deliveries', 1);
 
         $this->assertSame([], $this->supplier->calls, 'The code is already stored, so no supplier call is needed.');
@@ -231,8 +236,9 @@ class TimeoutTrapTest extends TestCase
 
         DeliveryAttempt::create([
             'order_id' => $order->id,
+            'order_item_id' => $this->itemOf($order)->id,
             'supplier' => SupplierId::A->value,
-            'request_id' => "req_{$order->public_id}_a_1",
+            'request_id' => $this->firstRequestId($order),
             'attempt_no' => 1,
             'tries' => 0,
             'status' => AttemptStatus::Pending,
@@ -258,8 +264,8 @@ class TimeoutTrapTest extends TestCase
     /**
      * Regression: a failed delivery commit cannot be ignored.
      *
-     * If the code belongs to another order, commit fails. Treating that as success
-     * would leave the order in delivering and make the scheduler retry forever.
+     * If the code belongs to another item, commit fails. Treating that as success
+     * would leave the item in delivering and make the scheduler retry forever.
      */
     #[Test]
     public function inability_to_commit_code_transitions_order_to_failure(): void
@@ -273,13 +279,15 @@ class TimeoutTrapTest extends TestCase
         $order = $this->paidOrder();
         DeliveryAttempt::create([
             'order_id' => $order->id,
+            'order_item_id' => $this->itemOf($order)->id,
             'supplier' => SupplierId::A->value,
-            'request_id' => "req_{$order->public_id}_a_1",
+            'request_id' => $this->firstRequestId($order),
             'attempt_no' => 1,
             'tries' => 1,
             'status' => AttemptStatus::Succeeded,
             'http_status' => 200,
             'code' => 'SHARED-CODE',
+            'reported_sku' => 'KEY-CS2-PRIME',
             'started_at' => now()->subMinute(),
             'finished_at' => now()->subMinute(),
         ]);
@@ -289,9 +297,12 @@ class TimeoutTrapTest extends TestCase
         $order->refresh();
 
         $this->assertSame(OrderStatus::DeliveryFailed, $order->status);
-        $this->assertSame('code_belongs_to_another_order', $order->failure_reason);
+        // A stored code that turns out to belong elsewhere is a supplier
+        // violation, not a plain delivery failure.
+        $this->assertSame('duplicate_code', $order->failure_reason);
         $this->assertDatabaseCount('deliveries', 1);
         $this->assertDatabaseCount('orphaned_codes', 1);
+        $this->assertDatabaseCount('supplier_violations', 1);
 
         app(FulfilOrder::class)->handle($order->id);
         $this->assertDatabaseCount('orphaned_codes', 1);

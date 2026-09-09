@@ -16,11 +16,11 @@ class OrderController extends Controller
     public function store(CreateOrderRequest $request, CreateOrder $createOrder): JsonResponse
     {
         $order = $createOrder->handle(
-            sku: $request->string('sku')->toString(),
+            lines: $request->lines(),
             customerEmail: $request->string('email')->toString() ?: null,
         );
 
-        return OrderResource::make($order->load('delivery'))
+        return OrderResource::make($order->load('items.delivery'))
             ->response()
             ->setStatusCode(201);
     }
@@ -28,7 +28,7 @@ class OrderController extends Controller
     public function show(string $publicId): OrderResource
     {
         $order = Order::query()
-            ->with('delivery')
+            ->with('items.delivery')
             ->where('public_id', $publicId)
             ->firstOrFail();
 

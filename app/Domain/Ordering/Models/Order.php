@@ -4,23 +4,25 @@ declare(strict_types=1);
 
 namespace App\Domain\Ordering\Models;
 
-use App\Domain\Catalog\Models\Product;
 use App\Domain\Delivery\Models\Delivery;
 use App\Domain\Delivery\Models\DeliveryAttempt;
 use App\Domain\Ordering\Enums\OrderStatus;
 use App\Domain\Ordering\Exceptions\IllegalTransition;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Support\Str;
 
 /**
+ * A purchase. Since stage 2 it is a container of items rather than a single
+ * product: it owns the payment, the total amount, and a status derived from its
+ * items by RecalculateOrderStatus.
+ *
  * @property int $id
  * @property string $public_id
  * @property OrderStatus $status
  * @property int $amount_minor
+ * @property string $currency
  */
 class Order extends Model
 {
@@ -31,10 +33,9 @@ class Order extends Model
         return [
             'status' => OrderStatus::class,
             'amount_minor' => 'integer',
-            'quantity' => 'integer',
-            'fulfilment_runs' => 'integer',
             'paid_at' => 'datetime',
             'delivered_at' => 'datetime',
+            'settled_at' => 'datetime',
             'last_payment_event_at' => 'datetime',
         ];
     }
@@ -48,14 +49,15 @@ class Order extends Model
         return 'ord_'.Str::lower((string) Str::ulid());
     }
 
-    public function product(): BelongsTo
+    public function items(): HasMany
     {
-        return $this->belongsTo(Product::class, 'sku', 'sku');
+        return $this->hasMany(OrderItem::class)->orderBy('position');
     }
 
-    public function delivery(): HasOne
+    /** Deliveries across every item of this order. */
+    public function deliveries(): HasMany
     {
-        return $this->hasOne(Delivery::class);
+        return $this->hasMany(Delivery::class);
     }
 
     public function attempts(): HasMany
@@ -64,10 +66,12 @@ class Order extends Model
     }
 
     /**
-     * The only way to change an order status.
+     * The only way to change an order status from the payment side.
      *
      * Does not persist the model. The caller must hold the transaction and row
-     * lock, making it explicit that status transitions require FOR UPDATE.
+     * lock, making it explicit that status changes require FOR UPDATE.
+     *
+     * Delivery-side statuses are not set here; they are derived from the items.
      */
     public function transitionTo(OrderStatus $target): void
     {
@@ -93,12 +97,7 @@ class Order extends Model
     /** @param  Builder<self>  $query */
     public function scopeAwaitingDelivery(Builder $query): void
     {
-        $query->whereIn('status', [
-            OrderStatus::Paid->value,
-            OrderStatus::Delivering->value,
-            OrderStatus::OutOfStock->value,
-            OrderStatus::DeliveryFailed->value,
-        ]);
+        $query->whereIn('status', OrderStatus::unsettledValues());
     }
 
     public function getRouteKeyName(): string

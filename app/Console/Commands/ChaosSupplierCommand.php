@@ -20,10 +20,10 @@ class ChaosSupplierCommand extends Command
 {
     protected $signature = 'chaos:supplier
         {supplier : a or b}
-        {mode : ok | error | timeout | out_of_stock | random}
+        {mode : ok | error | timeout | out_of_stock | duplicate | foreign_code | error_but_issued | random}
         {--ttl=600 : number of seconds to keep the mode active}';
 
-    protected $description = 'Force a supplier stub to use a specific behavior';
+    protected $description = 'Force a supplier stub to use a specific behavior, including the dishonest ones';
 
     public function handle(): int
     {
@@ -59,6 +59,12 @@ class ChaosSupplierCommand extends Command
             'Supplier %s switched to %s mode for %d seconds.',
             $supplier, $mode, (int) $this->option('ttl'),
         ));
+
+        if (ChaosMode::from($mode)->isDishonest()) {
+            $this->components->warn(
+                'This supplier now breaks its contract on purpose. Watch ops:auto-resolve and the reconciliation report.',
+            );
+        }
 
         return self::SUCCESS;
     }

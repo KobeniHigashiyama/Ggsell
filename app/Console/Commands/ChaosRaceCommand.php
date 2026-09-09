@@ -8,6 +8,7 @@ use App\Domain\Catalog\Actions\SyncStockFlag;
 use App\Domain\Delivery\Enums\SupplierId;
 use App\Domain\Delivery\Suppliers\CircuitBreaker;
 use App\Domain\Ordering\Models\Order;
+use App\Domain\Ordering\Models\OrderItem;
 use App\Stub\Supplier\SupplierIssueController;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
@@ -59,7 +60,7 @@ class ChaosRaceCommand extends Command
 
         $this->components->info(sprintf(
             'Order %s (%s, %d %s), concurrency %d, event ID mode: %s',
-            $order->public_id, $order->sku, intdiv($order->amount_minor, 100), $order->currency, $concurrency, $mode,
+            $order->public_id, $this->orderSku($order), intdiv($order->amount_minor, 100), $order->currency, $concurrency, $mode,
         ));
 
         $results = $this->fireWebhooks($order, $concurrency, $mode);
@@ -76,14 +77,30 @@ class ChaosRaceCommand extends Command
         return $result;
     }
 
+    /**
+     * The SKU this scenario runs against.
+     *
+     * chaos:race deliberately uses a single-line order: the property under test
+     * is contention on one order row, and extra lines would only add noise.
+     */
+    private function orderSku(Order $order): string
+    {
+        return (string) OrderItem::query()
+            ->where('order_id', $order->id)
+            ->orderBy('position')
+            ->value('sku');
+    }
+
     private function ensureSupplierStock(Order $order, int $minimum = 10): void
     {
+        $sku = $this->orderSku($order);
+
         // Count per supplier. The two pools are independent, so a combined total
         // can clear the threshold while one of them is empty and the fallback
         // leg of the scenario silently stops being exercised.
         $available = DB::table('stub.supplier_keys')
             ->selectRaw('supplier, count(*) AS available')
-            ->where('sku', $order->sku)
+            ->where('sku', $sku)
             ->where('status', 'available')
             ->groupBy('supplier')
             ->pluck('available', 'supplier');
@@ -94,7 +111,7 @@ class ChaosRaceCommand extends Command
             for ($i = (int) $available->get($supplier, 0); $i < $minimum; $i++) {
                 $rows[] = [
                     'supplier' => $supplier,
-                    'sku' => $order->sku,
+                    'sku' => $sku,
                     'code' => sprintf('RACE-%s-%s', strtoupper($supplier), strtoupper(bin2hex(random_bytes(5)))),
                     'status' => 'available',
                 ];
@@ -117,11 +134,11 @@ class ChaosRaceCommand extends Command
                 WHERE sku = ? AND status = 'available'
             ) agg
             WHERE ps.sku = agg.sku
-        SQL, [$order->sku, $order->sku]);
+        SQL, [$sku, $sku]);
 
-        app(SyncStockFlag::class)->handle($order->sku);
+        app(SyncStockFlag::class)->handle($sku);
 
-        $this->line(sprintf('  Topped supplier pools for %s up to %d keys each', $order->sku, $minimum));
+        $this->line(sprintf('  Topped supplier pools for %s up to %d keys each', $sku, $minimum));
     }
 
     /**

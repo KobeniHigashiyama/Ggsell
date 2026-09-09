@@ -40,6 +40,98 @@ final readonly class HttpSupplierClient implements SupplierClient
         }
     }
 
+    public function verify(SupplierId $supplier, string $requestId): SupplierResponse
+    {
+        $startedAt = hrtime(true);
+
+        try {
+            $response = Http::baseUrl(config('ggsell.suppliers.base_url'))
+                ->timeout(config('ggsell.suppliers.timeout'))
+                ->connectTimeout(config('ggsell.suppliers.connect_timeout'))
+                ->withHeaders(['X-Correlation-Id' => Correlation::id()])
+                ->acceptJson()
+                ->get("/suppliers/{$supplier->value}/requests/".rawurlencode($requestId));
+
+            return $this->classifyVerification($response, $this->elapsedMs($startedAt));
+        } catch (ConnectionException) {
+            // Every transport failure is unknown here, including the ones issue()
+            // treats as a definitive rejection. For issue() a refused connection
+            // proves the request never arrived and nothing was bought. For verify
+            // it proves only that we could not ask, and answering "no record" to
+            // that question is how an audit closes an attempt the supplier never
+            // spoke about, freeing the line to buy a second key or take a refund.
+            return SupplierResponse::unknown('unreachable', null, $this->elapsedMs($startedAt));
+        }
+    }
+
+    /**
+     * Classifies an answer about what a supplier did, which is not the same job
+     * as classifying an answer to a request for a code.
+     *
+     * issue() may read any contract-shaped error as a definitive rejection,
+     * because a supplier that says "out of stock" has told us it issued nothing.
+     * Nothing of the sort is true here: a 503 with a reason is still the supplier
+     * declining to answer, and reading it as "no record" lets an audit close an
+     * attempt on the strength of a question that was never answered.
+     *
+     * So exactly one response proves anything negative — the 404 the contract
+     * defines as "this request is not in my registry". Everything else that is
+     * not a code is unknown, and gets asked again.
+     */
+    private function classifyVerification(Response $response, int $latencyMs): SupplierResponse
+    {
+        if ($response->status() === 404) {
+            return SupplierResponse::rejected('unknown_request', 404, $latencyMs);
+        }
+
+        $body = $this->decode($response);
+
+        if ($response->successful()) {
+            $code = is_array($body) ? ($body['code'] ?? null) : null;
+
+            if (is_string($code) && $code !== '') {
+                $sku = is_array($body) ? ($body['sku'] ?? null) : null;
+
+                return SupplierResponse::ok(
+                    $code,
+                    $response->status(),
+                    $latencyMs,
+                    is_string($sku) && $sku !== '' ? $sku : null,
+                );
+            }
+
+            return SupplierResponse::unknown('malformed_success', $response->status(), $latencyMs);
+        }
+
+        $reason = is_array($body) ? ($body['reason'] ?? null) : null;
+
+        return SupplierResponse::unknown(
+            is_string($reason) && $reason !== '' ? $reason : 'opaque_error',
+            $response->status(),
+            $latencyMs,
+        );
+    }
+
+    public function returnCode(SupplierId $supplier, string $code, string $reason): bool
+    {
+        try {
+            return Http::baseUrl(config('ggsell.suppliers.base_url'))
+                ->timeout(config('ggsell.suppliers.timeout'))
+                ->connectTimeout(config('ggsell.suppliers.connect_timeout'))
+                ->withHeaders(['X-Correlation-Id' => Correlation::id()])
+                ->acceptJson()
+                ->post("/suppliers/{$supplier->value}/return", [
+                    'code' => $code,
+                    'reason' => $reason,
+                ])
+                ->successful();
+        } catch (ConnectionException) {
+            // Returning a code is safe to repeat, so an unreachable supplier just
+            // means the next sweep tries again.
+            return false;
+        }
+    }
+
     private function classify(Response $response, int $latencyMs): SupplierResponse
     {
         $body = $this->decode($response);
@@ -48,7 +140,14 @@ final readonly class HttpSupplierClient implements SupplierClient
             $code = is_array($body) ? ($body['code'] ?? null) : null;
 
             if (is_string($code) && $code !== '') {
-                return SupplierResponse::ok($code, $response->status(), $latencyMs);
+                $sku = is_array($body) ? ($body['sku'] ?? null) : null;
+
+                return SupplierResponse::ok(
+                    $code,
+                    $response->status(),
+                    $latencyMs,
+                    is_string($sku) && $sku !== '' ? $sku : null,
+                );
             }
 
             // A successful response without a code may still have consumed a key.

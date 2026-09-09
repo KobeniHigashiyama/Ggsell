@@ -18,6 +18,18 @@ Schedule::command('orders:resolve-stuck')
     ->everyMinute()
     ->withoutOverlapping();
 
+// Give the money back for lines that can no longer be delivered, so every paid
+// order reaches a terminal state without a human deciding one by one.
+Schedule::command('orders:settle')
+    ->everyMinute()
+    ->withoutOverlapping();
+
+// Audit what suppliers actually did, deliver or return whatever that turns up,
+// and close the incident. Stage 2 requires this to need no operator.
+Schedule::command('ops:auto-resolve')
+    ->everyMinute()
+    ->withoutOverlapping();
+
 Schedule::command('payments:replay')
     ->everyMinute()
     ->withoutOverlapping();

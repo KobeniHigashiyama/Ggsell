@@ -10,6 +10,10 @@
 /.claude
 /AGENTS.md
 /CLAUDE.md
+/.mcp.json
+/boost.json
+# The assignment is kept in the repository in English only; the originals stay local.
+/task/Тестовое*.md
 /.cursor/
 /.idea
 /.nova

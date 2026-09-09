@@ -7,6 +7,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Domain\Ops\Reconciliation\ReconciliationReport;
 use App\Domain\Ops\Recovery\ResolveOrphanedCode;
 use App\Domain\Ordering\Models\Order;
+use App\Domain\Ordering\Models\OrderItem;
 use App\Http\Controllers\Controller;
 use App\Jobs\FulfilOrderJob;
 use DomainException;
@@ -74,16 +75,20 @@ class ReconciliationController extends Controller
     {
         $order = Order::query()->where('public_id', $publicId)->firstOrFail();
 
-        // Reset the automatic-run budget. It prevents endless background work,
-        // not manual intervention; without a reset recovery would require a
-        // direct database edit.
-        $order->forceFill(['fulfilment_runs' => 0])->save();
+        // Reset the automatic-run budget on the lines that still owe a code. It
+        // prevents endless background work, not manual intervention; without a
+        // reset recovery would require a direct database edit.
+        $requeued = OrderItem::query()
+            ->where('order_id', $order->id)
+            ->unsettled()
+            ->update(['fulfilment_runs' => 0, 'updated_at' => now()]);
 
         FulfilOrderJob::dispatch($order->id);
 
         return response()->json([
             'order_id' => $order->public_id,
             'status' => $order->status->value,
+            'items_requeued' => $requeued,
             'queued' => true,
         ], 202);
     }

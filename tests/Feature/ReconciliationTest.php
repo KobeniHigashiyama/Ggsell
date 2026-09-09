@@ -11,16 +11,14 @@ use App\Domain\Delivery\Models\DeliveryAttempt;
 use App\Domain\Delivery\Models\OrphanedCode;
 use App\Domain\Delivery\Suppliers\SupplierClient;
 use App\Domain\Delivery\Suppliers\SupplierResponse;
-use App\Domain\Ledger\Account;
-use App\Domain\Ledger\Actions\PostTransaction;
-use App\Domain\Ledger\LedgerLine;
 use App\Domain\Ops\Reconciliation\ReconciliationReport;
-use App\Domain\Ops\Recovery\ResolveStuckOrders;
+use App\Domain\Ops\Recovery\ResolveStuckDeliveries;
 use App\Domain\Ordering\Enums\OrderStatus;
 use App\Domain\Ordering\Models\Order;
+use App\Domain\Ordering\Models\OrderItem;
 use App\Domain\Payments\Actions\ReplayPendingEvents;
 use App\Domain\Payments\Models\PaymentEvent;
-use App\Jobs\FulfilOrderJob;
+use App\Jobs\FulfilOrderItemJob;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 use PHPUnit\Framework\Attributes\Test;
@@ -47,14 +45,35 @@ class ReconciliationTest extends TestCase
      */
     private function order(OrderStatus $status, ?int $paidSecondsAgo = 0): Order
     {
-        return Order::create([
-            'public_id' => Order::newPublicId(),
-            'sku' => 'KEY-CS2-PRIME',
-            'quantity' => 1,
-            'amount_minor' => 129000,
-            'currency' => 'RUB',
+        return $this->makeOrder('KEY-CS2-PRIME', [
             'status' => $status,
             'paid_at' => $paidSecondsAgo !== null ? now()->subSeconds($paidSecondsAgo) : null,
+        ]);
+    }
+
+    /** Backdates a line so recovery treats it as inactive. */
+    private function ageItem(Order $order, int $seconds): OrderItem
+    {
+        $item = $this->itemOf($order);
+        $item->timestamps = false;
+        $item->updated_at = now()->subSeconds($seconds);
+        $item->save();
+
+        return $item;
+    }
+
+    /** The attempt row a stage-1 test would have written for the single line. */
+    private function attemptFor(Order $order, array $attributes): DeliveryAttempt
+    {
+        $item = $this->itemOf($order);
+
+        return DeliveryAttempt::create($attributes + [
+            'order_id' => $order->id,
+            'order_item_id' => $item->id,
+            'request_id' => sprintf('req_%s_%s_1', $item->public_id, $attributes['supplier']),
+            'attempt_no' => 1,
+            'tries' => 1,
+            'started_at' => now(),
         ]);
     }
 
@@ -85,18 +104,8 @@ class ReconciliationTest extends TestCase
     #[Test]
     public function liability_balance_matches_undelivered_order_total(): void
     {
+        // makeOrder() posts the payment entries a real webhook would have written.
         $order = $this->order(OrderStatus::Paid);
-
-        app(PostTransaction::class)->handle(
-            lines: [
-                LedgerLine::debit(Account::Cash, 129000),
-                LedgerLine::credit(Account::CustomerLiability, 129000),
-            ],
-            currency: 'RUB',
-            refType: 'payment_event',
-            refId: 'evt_recon',
-            orderId: $order->id,
-        );
 
         $result = app(ReconciliationReport::class)->build();
         $rub = collect($result['checks']['liability_mismatch']['by_currency'])->firstWhere('currency', 'RUB');
@@ -122,18 +131,16 @@ class ReconciliationTest extends TestCase
         Queue::fake();
 
         $stuck = $this->order(OrderStatus::DeliveryFailed, paidSecondsAgo: 3600);
-        $stuck->timestamps = false;
-        $stuck->updated_at = now()->subHour();
-        $stuck->save();
+        $stuckItem = $this->ageItem($stuck, 3600);
 
         $this->order(OrderStatus::Paid);
         $this->order(OrderStatus::Created, paidSecondsAgo: null);
 
-        $count = app(ResolveStuckOrders::class)->handle(stuckAfterSeconds: 60);
+        $count = app(ResolveStuckDeliveries::class)->handle(stuckAfterSeconds: 60);
 
         $this->assertSame(1, $count);
-        Queue::assertPushed(FulfilOrderJob::class, 1);
-        Queue::assertPushed(fn (FulfilOrderJob $job): bool => $job->orderId === $stuck->id);
+        Queue::assertPushed(FulfilOrderItemJob::class, 1);
+        Queue::assertPushed(fn (FulfilOrderItemJob $job): bool => $job->orderItemId === $stuckItem->id);
     }
 
     #[Test]
@@ -142,15 +149,15 @@ class ReconciliationTest extends TestCase
         Queue::fake();
 
         $order = $this->order(OrderStatus::DeliveryFailed, paidSecondsAgo: 3600);
-        $order->timestamps = false;
-        $order->fulfilment_runs = (int) config('ggsell.recovery.max_fulfilment_runs');
-        $order->updated_at = now()->subHour();
-        $order->save();
+        $item = $this->ageItem($order, 3600);
+        $item->timestamps = false;
+        $item->fulfilment_runs = (int) config('ggsell.recovery.max_fulfilment_runs');
+        $item->save();
 
-        // An exhausted order stops consuming supplier capacity and remains visible
+        // An exhausted line stops consuming supplier capacity and remains visible
         // for manual review in reconciliation.
-        $this->assertSame(0, app(ResolveStuckOrders::class)->handle(stuckAfterSeconds: 60));
-        Queue::assertNotPushed(FulfilOrderJob::class);
+        $this->assertSame(0, app(ResolveStuckDeliveries::class)->handle(stuckAfterSeconds: 60));
+        Queue::assertNotPushed(FulfilOrderItemJob::class);
 
         $result = app(ReconciliationReport::class)->build(60);
         $this->assertSame(1, $result['checks']['paid_not_delivered']['count']);
@@ -230,7 +237,7 @@ class ReconciliationTest extends TestCase
             'status' => 'failed',
             'amount' => 1290,
             'currency' => 'RUB',
-            'created_at' => now()->toIso8601String(),
+            'created_at' => now()->subMinute()->toIso8601String(),
         ])->assertOk()->assertJson(['outcome' => 'no_op']);
 
         // A second failure for one order must not double the reported loss.
@@ -240,7 +247,9 @@ class ReconciliationTest extends TestCase
             'status' => 'failed',
             'amount' => 1290,
             'currency' => 'RUB',
-            'created_at' => now()->addMinute()->toIso8601String(),
+            // Strictly newer than the first failure, but still in the past: the
+            // webhook contract no longer accepts a timestamp from the future.
+            'created_at' => now()->toIso8601String(),
         ])->assertOk();
 
         $report = app(ReconciliationReport::class);
@@ -294,12 +303,8 @@ class ReconciliationTest extends TestCase
     {
         $order = $this->order(OrderStatus::DeliveryFailed, paidSecondsAgo: 3600);
 
-        DeliveryAttempt::create([
-            'order_id' => $order->id,
+        $this->attemptFor($order, [
             'supplier' => 'a',
-            'request_id' => "req_{$order->public_id}_a_1",
-            'attempt_no' => 1,
-            'tries' => 1,
             'status' => AttemptStatus::Unknown,
             'started_at' => now()->subHour(),
         ]);
@@ -310,10 +315,11 @@ class ReconciliationTest extends TestCase
             SupplierResponse::unknown('timeout', null, 2000),
         ]);
 
-        $before = $order->fulfilment_runs;
+        $item = $this->itemOf($order);
+        $before = $item->fulfilment_runs;
         app(FulfilOrder::class)->handle($order->id);
 
-        $this->assertSame($before + 1, $order->refresh()->fulfilment_runs);
+        $this->assertSame($before + 1, $item->refresh()->fulfilment_runs);
     }
 
     #[Test]
@@ -321,12 +327,8 @@ class ReconciliationTest extends TestCase
     {
         $order = $this->order(OrderStatus::Delivering, paidSecondsAgo: 3600);
 
-        DeliveryAttempt::create([
-            'order_id' => $order->id,
+        $this->attemptFor($order, [
             'supplier' => 'a',
-            'request_id' => "req_{$order->public_id}_a_1",
-            'attempt_no' => 1,
-            'tries' => 1,
             'status' => AttemptStatus::Succeeded,
             'http_status' => 200,
             'code' => 'CODE-UNCOMMITTED',
@@ -392,31 +394,16 @@ class ReconciliationTest extends TestCase
         app(FulfilOrder::class)->handle($order->id);
         $this->assertSame(OrderStatus::Delivered, $order->refresh()->status);
 
-        app(PostTransaction::class)->handle(
-            lines: [
-                LedgerLine::debit(Account::Cash, $order->amount_minor),
-                LedgerLine::credit(Account::CustomerLiability, $order->amount_minor),
-            ],
-            currency: $order->currency,
-            refType: 'payment_event',
-            refId: 'evt_for_orphan',
-            orderId: $order->id,
-        );
-
-        $attempt = DeliveryAttempt::create([
-            'order_id' => $order->id,
+        $attempt = $this->attemptFor($order, [
             'supplier' => 'b',
-            'request_id' => "req_{$order->public_id}_b_1",
-            'attempt_no' => 1,
-            'tries' => 1,
             'status' => AttemptStatus::Succeeded,
             'code' => 'ORPHAN-CODE',
-            'started_at' => now(),
             'finished_at' => now(),
         ]);
 
         $orphan = OrphanedCode::create([
             'order_id' => $order->id,
+            'order_item_id' => $this->itemOf($order)->id,
             'delivery_attempt_id' => $attempt->id,
             'supplier' => 'b',
             'code' => 'ORPHAN-CODE',
@@ -444,13 +431,13 @@ class ReconciliationTest extends TestCase
     public function resolution_without_description_is_rejected(): void
     {
         $order = $this->order(OrderStatus::Delivered);
-        $attempt = DeliveryAttempt::create([
-            'order_id' => $order->id, 'supplier' => 'a',
-            'request_id' => "req_{$order->public_id}_a_1", 'attempt_no' => 1, 'tries' => 1,
-            'status' => AttemptStatus::Succeeded, 'code' => 'C1', 'started_at' => now(), 'finished_at' => now(),
+        $attempt = $this->attemptFor($order, [
+            'supplier' => 'a', 'status' => AttemptStatus::Succeeded,
+            'code' => 'C1', 'finished_at' => now(),
         ]);
         $orphan = OrphanedCode::create([
-            'order_id' => $order->id, 'delivery_attempt_id' => $attempt->id,
+            'order_id' => $order->id, 'order_item_id' => $this->itemOf($order)->id,
+            'delivery_attempt_id' => $attempt->id,
             'supplier' => 'a', 'code' => 'C1', 'reason' => 'lost_delivery_race',
         ]);
 

@@ -6,6 +6,8 @@ namespace App\Providers;
 
 use App\Domain\Delivery\Suppliers\HttpSupplierClient;
 use App\Domain\Delivery\Suppliers\SupplierClient;
+use App\Domain\Refunds\Gateways\HttpPaymentGateway;
+use App\Domain\Refunds\Gateways\PaymentGateway;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\ServiceProvider;
 
@@ -14,6 +16,7 @@ class DomainServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->app->bind(SupplierClient::class, HttpSupplierClient::class);
+        $this->app->bind(PaymentGateway::class, HttpPaymentGateway::class);
     }
 
     public function boot(): void

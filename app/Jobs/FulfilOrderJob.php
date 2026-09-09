@@ -11,8 +11,10 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 
 /**
- * Delivery runs outside the HTTP request because the payment provider needs a
- * fast 200 while supplier timeouts and backoff can take seconds.
+ * Fans a paid order out into one delivery job per item.
+ *
+ * It runs outside the HTTP request because the payment provider needs a fast
+ * 200 while supplier timeouts and backoff can take seconds.
  *
  * ShouldBeUnique is an optimization, not a guarantee. Cache locks may expire or
  * disappear; database unique indexes provide exactly-once guarantees. Job
@@ -23,7 +25,7 @@ class FulfilOrderJob implements ShouldBeUnique, ShouldQueue
     use Queueable;
 
     /**
-     * Queue-level retries are deliberately disabled. FulfilOrder owns retry
+     * Queue-level retries are deliberately disabled. FulfilOrderItem owns retry
      * policy because it distinguishes timeouts from rejections; blind queue
      * retries would corrupt that accounting.
      */
@@ -41,9 +43,10 @@ class FulfilOrderJob implements ShouldBeUnique, ShouldQueue
         // linked to the originating HTTP request.
         $this->correlationId = $correlationId ?? Correlation::id();
 
-        // Supplier timeouts can hold delivery workers for seconds, so use a
-        // dedicated queue instead of delaying unrelated short jobs.
-        $this->onQueue('delivery');
+        // A customer has just paid, so the fan-out rides the same priority queue
+        // as the deliveries it creates. Naming the queue anywhere else would let
+        // it drift away from what the workers actually consume.
+        $this->onQueue(FulfilOrderItemJob::QUEUE_PAID);
     }
 
     public function uniqueId(): string

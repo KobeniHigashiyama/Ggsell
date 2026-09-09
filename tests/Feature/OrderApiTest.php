@@ -36,12 +36,7 @@ class OrderApiTest extends TestCase
     #[Test]
     public function code_is_hidden_until_order_is_delivered(): void
     {
-        $order = Order::query()->create([
-            'public_id' => Order::newPublicId(),
-            'sku' => 'KEY-GTA5',
-            'quantity' => 1,
-            'amount_minor' => 199000,
-            'currency' => 'RUB',
+        $order = $this->makeOrder('KEY-GTA5', [
             'status' => OrderStatus::Paid,
             'paid_at' => now(),
         ]);
@@ -50,6 +45,78 @@ class OrderApiTest extends TestCase
             ->assertOk()
             ->assertJsonPath('data.status', 'paid')
             ->assertJsonMissingPath('data.code');
+    }
+
+    #[Test]
+    public function order_can_hold_several_items_from_different_products(): void
+    {
+        $this->postJson('/api/v1/orders', ['items' => [
+            ['sku' => 'KEY-GTA5'],
+            ['sku' => 'KEY-EFT', 'quantity' => 2],
+        ]])
+            ->assertCreated()
+            ->assertJsonPath('data.status', 'created')
+            // 1990 + 3490 * 2
+            ->assertJsonPath('data.amount_minor', 199000 + 349000 * 2)
+            ->assertJsonCount(3, 'data.items')
+            ->assertJsonPath('data.items.0.sku', 'KEY-GTA5')
+            ->assertJsonPath('data.items.1.sku', 'KEY-EFT')
+            ->assertJsonPath('data.items.2.sku', 'KEY-EFT')
+            ->assertJsonPath('data.items.2.position', 3)
+            ->assertJsonPath('data.items.0.status', 'pending')
+            // Top-level sku is meaningless once an order spans products.
+            ->assertJsonMissingPath('data.sku');
+
+        $this->assertDatabaseCount('orders', 1);
+        $this->assertDatabaseCount('order_items', 3);
+    }
+
+    #[Test]
+    public function quantity_becomes_one_deliverable_item_per_unit(): void
+    {
+        $response = $this->postJson('/api/v1/orders', ['items' => [
+            ['sku' => 'KEY-GTA5', 'quantity' => 3],
+        ]])->assertCreated();
+
+        // Each unit needs its own code, so each is its own item and can be
+        // delivered or refunded independently.
+        $this->assertCount(3, $response->json('data.items'));
+        $this->assertSame([1, 2, 3], array_column($response->json('data.items'), 'position'));
+        $this->assertSame(199000 * 3, $response->json('data.amount_minor'));
+    }
+
+    #[Test]
+    public function single_item_order_keeps_stage_one_response_shape(): void
+    {
+        $this->postJson('/api/v1/orders', ['items' => [['sku' => 'KEY-GTA5']]])
+            ->assertCreated()
+            ->assertJsonPath('data.sku', 'KEY-GTA5')
+            ->assertJsonPath('data.amount_minor', 199000)
+            ->assertJsonCount(1, 'data.items');
+    }
+
+    #[Test]
+    public function mixing_both_request_shapes_is_rejected(): void
+    {
+        $this->postJson('/api/v1/orders', [
+            'sku' => 'KEY-GTA5',
+            'items' => [['sku' => 'KEY-EFT']],
+        ])->assertStatus(422)->assertJsonValidationErrors('items');
+
+        $this->assertDatabaseCount('orders', 0);
+    }
+
+    #[Test]
+    public function unknown_sku_inside_items_is_rejected_by_validation(): void
+    {
+        $this->postJson('/api/v1/orders', ['items' => [
+            ['sku' => 'KEY-GTA5'],
+            ['sku' => 'NO-SUCH-SKU'],
+        ]])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('items.1.sku');
+
+        $this->assertDatabaseCount('orders', 0);
     }
 
     #[Test]

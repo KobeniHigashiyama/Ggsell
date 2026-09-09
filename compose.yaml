@@ -55,7 +55,9 @@ services:
       - .:/app
     # --tries=1 keeps retries in the domain layer (FulfilOrder). Blind queue
     # retries on top of domain retries would corrupt attempt accounting.
-    command: php artisan queue:work --queue=delivery,default --tries=1 --timeout=120 --sleep=1
+    # Queue order is the priority: paid customers first, then the system's own
+    # retries and settlement.
+    command: php artisan queue:work --queue=delivery-paid,delivery-recovery,default --tries=1 --timeout=120 --sleep=1
     restart: unless-stopped
 
   scheduler:

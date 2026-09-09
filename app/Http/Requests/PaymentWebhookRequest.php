@@ -33,7 +33,13 @@ class PaymentWebhookRequest extends FormRequest
             // Use an allowlist because an unsupported currency indicates payment
             // misrouting, not an amount mismatch that order comparison can resolve.
             'currency' => ['required', 'string', 'size:3', Rule::in(config('ggsell.currencies'))],
-            'created_at' => ['nullable', 'date'],
+            // Bounded on purpose. This timestamp becomes the business time of the
+            // payment in the event log and drives the out-of-order guard, and the
+            // endpoint is public and unsigned, so an unbounded value lets a caller
+            // place a payment anywhere on the timeline: before its own order, or
+            // far enough ahead that period reports and point-in-time answers
+            // disagree with the ledger.
+            'created_at' => ['nullable', 'date', 'before_or_equal:now', 'after:-1 year'],
         ];
     }
 
@@ -72,8 +78,14 @@ class PaymentWebhookRequest extends FormRequest
             // and (int) ($value * 100) could produce 129034 instead of 129035.
             amountMinor: Money::fromMajor($this->input('amount')),
             currency: $this->string('currency')->upper()->toString(),
+            // Normalized to the application timezone. Carbon keeps the offset the
+            // provider sent, and Eloquent would then write that wall-clock time
+            // into a UTC column: a webhook from +05:00 would be stored five hours
+            // in the future, which is enough to make a newer event look stale and
+            // be rejected.
             occurredAt: $this->filled('created_at')
                 ? CarbonImmutable::parse($this->string('created_at')->toString())
+                    ->setTimezone(config('app.timezone', 'UTC'))
                 : null,
             raw: $this->all(),
         );

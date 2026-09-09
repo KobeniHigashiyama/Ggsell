@@ -6,12 +6,16 @@ namespace App\Domain\Delivery\Models;
 
 use App\Domain\Delivery\Enums\SupplierId;
 use App\Domain\Ordering\Models\Order;
+use App\Domain\Ordering\Models\OrderItem;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
- * A completed delivery. UNIQUE(order_id) guarantees one delivery per order, and
- * UNIQUE(code) guarantees that a code cannot be assigned to multiple orders.
+ * A completed delivery.
+ *
+ * UNIQUE(order_item_id) guarantees one delivery per deliverable unit, and
+ * UNIQUE(code) is global, so a code can never be assigned to a second item even
+ * when the supplier issues it twice.
  */
 class Delivery extends Model
 {
@@ -30,6 +34,11 @@ class Delivery extends Model
     public function order(): BelongsTo
     {
         return $this->belongsTo(Order::class);
+    }
+
+    public function orderItem(): BelongsTo
+    {
+        return $this->belongsTo(OrderItem::class);
     }
 
     public function attempt(): BelongsTo

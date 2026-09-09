@@ -5,12 +5,15 @@ declare(strict_types=1);
 namespace Tests\Feature\Delivery;
 
 use App\Domain\Delivery\Actions\CommitDelivery;
+use App\Domain\Delivery\Actions\DeliveryCommitResult;
 use App\Domain\Delivery\Actions\FulfilOrder;
 use App\Domain\Delivery\Enums\AttemptStatus;
 use App\Domain\Delivery\Enums\SupplierId;
+use App\Domain\Delivery\Models\Delivery;
 use App\Domain\Delivery\Models\DeliveryAttempt;
 use App\Domain\Delivery\Suppliers\SupplierClient;
 use App\Domain\Delivery\Suppliers\SupplierResponse;
+use App\Domain\Ordering\Enums\OrderItemStatus;
 use App\Domain\Ordering\Enums\OrderStatus;
 use App\Domain\Ordering\Exceptions\IllegalTransition;
 use App\Domain\Ordering\Models\Order;
@@ -36,15 +39,16 @@ class SupplierFallbackTest extends TestCase
 
     private function paidOrder(): Order
     {
-        return Order::create([
-            'public_id' => Order::newPublicId(),
-            'sku' => 'KEY-CS2-PRIME',
-            'quantity' => 1,
-            'amount_minor' => 129000,
-            'currency' => 'RUB',
+        return $this->makeOrder('KEY-CS2-PRIME', [
             'status' => OrderStatus::Paid,
             'paid_at' => now(),
         ]);
+    }
+
+    /** The request_id the orchestrator will build for the first attempt. */
+    private function firstRequestId(Order $order): string
+    {
+        return sprintf('req_%s_a_1', $this->itemOf($order)->public_id);
     }
 
     #[Test]
@@ -60,8 +64,8 @@ class SupplierFallbackTest extends TestCase
         $order->refresh();
 
         $this->assertSame(OrderStatus::Delivered, $order->status);
-        $this->assertSame('CODE-FROM-B', $order->delivery->code);
-        $this->assertSame(SupplierId::B, $order->delivery->supplier);
+        $this->assertSame('CODE-FROM-B', $this->deliveredCode($order));
+        $this->assertSame(SupplierId::B, Delivery::query()->sole()->supplier);
         $this->assertDatabaseCount('deliveries', 1);
 
         $attempts = DeliveryAttempt::query()->orderBy('id')->get();
@@ -111,7 +115,7 @@ class SupplierFallbackTest extends TestCase
         $order->refresh();
 
         $this->assertSame(OrderStatus::Delivered, $order->status);
-        $this->assertSame('RESTOCKED-0001', $order->delivery->code);
+        $this->assertSame('RESTOCKED-0001', $this->deliveredCode($order));
         $this->assertDatabaseCount('deliveries', 1);
         $this->assertLedgerBalanced();
     }
@@ -135,7 +139,7 @@ class SupplierFallbackTest extends TestCase
     }
 
     /**
-     * Regression: a committed delivery must transition the order to delivered.
+     * Regression: a committed delivery must transition the item to delivered.
      *
      * A concurrent run may report a shortage after another receives a code. Once
      * deliveries contains a row, the status must reflect that the customer owns
@@ -146,11 +150,16 @@ class SupplierFallbackTest extends TestCase
     {
         $order = $this->paidOrder();
         $order->forceFill(['status' => OrderStatus::OutOfStock, 'failure_reason' => 'out_of_stock'])->save();
+        $this->itemOf($order)->forceFill([
+            'status' => OrderItemStatus::OutOfStock,
+            'failure_reason' => 'out_of_stock',
+        ])->save();
 
         $attempt = DeliveryAttempt::create([
             'order_id' => $order->id,
+            'order_item_id' => $this->itemOf($order)->id,
             'supplier' => SupplierId::A->value,
-            'request_id' => "req_{$order->public_id}_a_1",
+            'request_id' => $this->firstRequestId($order),
             'attempt_no' => 1,
             'tries' => 1,
             'status' => AttemptStatus::Succeeded,
@@ -160,13 +169,16 @@ class SupplierFallbackTest extends TestCase
             'finished_at' => now()->subMinute(),
         ]);
 
-        $this->assertTrue(app(CommitDelivery::class)->handle($order, $attempt, 'LATE-CODE'));
+        $this->assertSame(
+            DeliveryCommitResult::Committed,
+            app(CommitDelivery::class)->handle($this->itemOf($order), $attempt, 'LATE-CODE'),
+        );
 
         $order->refresh();
 
         $this->assertSame(OrderStatus::Delivered, $order->status);
         $this->assertNull($order->failure_reason);
-        $this->assertSame('LATE-CODE', $order->delivery->code);
+        $this->assertSame('LATE-CODE', $this->deliveredCode($order));
     }
 
     /**
@@ -177,13 +189,15 @@ class SupplierFallbackTest extends TestCase
     #[Test]
     public function committing_delivery_for_unpaid_order_is_rolled_back(): void
     {
-        $order = $this->paidOrder();
-        $order->forceFill(['status' => OrderStatus::Created, 'paid_at' => null])->save();
+        // An unpaid order from the start: forcing a paid one back would leave its
+        // payment entries behind and hide what this test is about.
+        $order = $this->makeOrder('KEY-CS2-PRIME');
 
         $attempt = DeliveryAttempt::create([
             'order_id' => $order->id,
+            'order_item_id' => $this->itemOf($order)->id,
             'supplier' => SupplierId::A->value,
-            'request_id' => "req_{$order->public_id}_a_1",
+            'request_id' => $this->firstRequestId($order),
             'attempt_no' => 1,
             'tries' => 1,
             'status' => AttemptStatus::Succeeded,
@@ -196,7 +210,7 @@ class SupplierFallbackTest extends TestCase
         $this->expectException(IllegalTransition::class);
 
         try {
-            app(CommitDelivery::class)->handle($order, $attempt, 'SHOULD-NOT-LAND');
+            app(CommitDelivery::class)->handle($this->itemOf($order), $attempt, 'SHOULD-NOT-LAND');
         } finally {
             $this->assertDatabaseCount('deliveries', 0);
             $this->assertDatabaseCount('ledger_entries', 0);
@@ -214,8 +228,9 @@ class SupplierFallbackTest extends TestCase
 
         DeliveryAttempt::create([
             'order_id' => $order->id,
+            'order_item_id' => $this->itemOf($order)->id,
             'supplier' => SupplierId::A->value,
-            'request_id' => "req_{$order->public_id}_a_1",
+            'request_id' => $this->firstRequestId($order),
             'attempt_no' => 1,
             'tries' => 1,
             'status' => AttemptStatus::Pending,

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Domain\Payments\Actions;
 
+use App\Domain\History\Actions\RecordOrderEvent;
+use App\Domain\History\Enums\OrderEventType;
 use App\Domain\Ledger\Account;
 use App\Domain\Ledger\Actions\PostTransaction;
 use App\Domain\Ledger\LedgerLine;
@@ -31,6 +33,7 @@ final readonly class ApplyPaymentToOrder
 {
     public function __construct(
         private PostTransaction $postTransaction,
+        private RecordOrderEvent $recordEvent,
     ) {}
 
     public function handle(PaymentEvent $event): PaymentOutcome
@@ -170,6 +173,22 @@ final readonly class ApplyPaymentToOrder
             orderId: $order->id,
         );
 
+        $this->recordEvent->handle(
+            type: OrderEventType::PaymentApplied,
+            orderId: $order->id,
+            orderItemId: null,
+            payload: [
+                'event_id' => $event->event_id,
+                'amount_minor' => $order->amount_minor,
+                'currency' => $order->currency,
+            ],
+            refType: 'payment_event',
+            refId: $event->event_id,
+            // The event's own timestamp, not now(): a webhook that arrived late
+            // still happened when the payment happened.
+            occurredAt: $eventAt,
+        );
+
         // Dispatch after commit so a rolled-back payment cannot enqueue delivery.
         FulfilOrderJob::dispatch($order->id)->afterCommit();
 
@@ -194,6 +213,16 @@ final readonly class ApplyPaymentToOrder
         $order->failure_reason = 'payment_declined';
         $order->last_payment_event_at = $eventAt;
         $order->save();
+
+        $this->recordEvent->handle(
+            type: OrderEventType::PaymentFailed,
+            orderId: $order->id,
+            orderItemId: null,
+            payload: ['event_id' => $event->event_id, 'reason' => 'payment_declined'],
+            refType: 'payment_event',
+            refId: $event->event_id,
+            occurredAt: $eventAt,
+        );
 
         return PaymentOutcome::Applied;
     }

@@ -27,18 +27,6 @@ class PaymentWebhookTest extends TestCase
         Queue::fake();
     }
 
-    private function makeOrder(): Order
-    {
-        return Order::create([
-            'public_id' => Order::newPublicId(),
-            'sku' => 'KEY-CS2-PRIME',
-            'quantity' => 1,
-            'amount_minor' => 129000,
-            'currency' => 'RUB',
-            'status' => OrderStatus::Created,
-        ]);
-    }
-
     private function webhook(array $overrides = []): array
     {
         return array_merge([
@@ -54,7 +42,7 @@ class PaymentWebhookTest extends TestCase
     #[Test]
     public function payment_transitions_order_to_paid_and_queues_delivery(): void
     {
-        $order = $this->makeOrder();
+        $order = $this->makeOrder('KEY-CS2-PRIME');
 
         $this->postJson('/api/v1/webhooks/payment', $this->webhook(['order_id' => $order->public_id]))
             ->assertOk()
@@ -79,7 +67,7 @@ class PaymentWebhookTest extends TestCase
     #[Test]
     public function repeated_webhook_with_same_event_id_changes_nothing(): void
     {
-        $order = $this->makeOrder();
+        $order = $this->makeOrder('KEY-CS2-PRIME');
         $payload = $this->webhook(['order_id' => $order->public_id]);
 
         $this->postJson('/api/v1/webhooks/payment', $payload)->assertOk();
@@ -113,14 +101,7 @@ class PaymentWebhookTest extends TestCase
         $event = PaymentEvent::query()->sole();
         $this->assertNull($event->processed_at, 'An unapplied event must remain queued for replay.');
 
-        $order = Order::create([
-            'public_id' => $publicId,
-            'sku' => 'KEY-CS2-PRIME',
-            'quantity' => 1,
-            'amount_minor' => 129000,
-            'currency' => 'RUB',
-            'status' => OrderStatus::Created,
-        ]);
+        $order = $this->makeOrder('KEY-CS2-PRIME', ['public_id' => $publicId]);
 
         app(ReplayPendingEvents::class)->forOrder($publicId);
 
@@ -132,7 +113,7 @@ class PaymentWebhookTest extends TestCase
     #[Test]
     public function failed_payment_closes_order_without_ledger_entries(): void
     {
-        $order = $this->makeOrder();
+        $order = $this->makeOrder('KEY-CS2-PRIME');
 
         $this->postJson('/api/v1/webhooks/payment', $this->webhook([
             'order_id' => $order->public_id,
@@ -147,7 +128,7 @@ class PaymentWebhookTest extends TestCase
     #[Test]
     public function stale_event_does_not_revert_state(): void
     {
-        $order = $this->makeOrder();
+        $order = $this->makeOrder('KEY-CS2-PRIME');
 
         $this->postJson('/api/v1/webhooks/payment', $this->webhook([
             'event_id' => 'evt_new',
@@ -169,7 +150,7 @@ class PaymentWebhookTest extends TestCase
     #[Test]
     public function amount_mismatch_does_not_start_delivery(): void
     {
-        $order = $this->makeOrder();
+        $order = $this->makeOrder('KEY-CS2-PRIME');
 
         $this->postJson('/api/v1/webhooks/payment', $this->webhook([
             'order_id' => $order->public_id,
@@ -186,13 +167,9 @@ class PaymentWebhookTest extends TestCase
     {
         // 1290.35 is slightly lower as a double, so naive integer casting after
         // multiplication yields 129034. This distinguishes rounding from casting.
-        $order = Order::create([
-            'public_id' => Order::newPublicId(),
-            'sku' => 'KEY-CS2-PRIME',
-            'quantity' => 1,
+        $order = $this->makeOrder('KEY-CS2-PRIME', [
             'amount_minor' => 129035,
-            'currency' => 'RUB',
-            'status' => OrderStatus::Created,
+            'item_amount_minor' => 129035,
         ]);
 
         $this->postJson('/api/v1/webhooks/payment', $this->webhook([
@@ -207,7 +184,7 @@ class PaymentWebhookTest extends TestCase
     #[Test]
     public function malformed_amount_is_rejected_by_validation(): void
     {
-        $order = $this->makeOrder();
+        $order = $this->makeOrder('KEY-CS2-PRIME');
 
         foreach (['1e20', '12.345', -5] as $bad) {
             $this->postJson('/api/v1/webhooks/payment', $this->webhook([
@@ -223,7 +200,7 @@ class PaymentWebhookTest extends TestCase
     #[Test]
     public function failure_with_mismatched_amount_still_closes_order(): void
     {
-        $order = $this->makeOrder();
+        $order = $this->makeOrder('KEY-CS2-PRIME');
 
         // Amount is irrelevant for a failure and must not block its transition.
         $this->postJson('/api/v1/webhooks/payment', $this->webhook([
@@ -235,10 +212,66 @@ class PaymentWebhookTest extends TestCase
         $this->assertSame(OrderStatus::PaymentFailed, $order->refresh()->status);
     }
 
+    /**
+     * Regression: a provider in another timezone must not shift the timeline.
+     *
+     * Carbon keeps whatever offset arrives, and a timestamp column stores wall
+     * clock. Left unnormalized, a webhook from +05:00 lands five hours in the
+     * future, and the out-of-order guard then rejects genuinely newer events.
+     */
+    #[Test]
+    public function webhook_timestamp_is_normalized_to_the_application_timezone(): void
+    {
+        $order = $this->makeOrder('KEY-CS2-PRIME');
+        $moment = now()->subMinutes(5);
+
+        $this->postJson('/api/v1/webhooks/payment', $this->webhook([
+            'order_id' => $order->public_id,
+            'created_at' => $moment->copy()->setTimezone('+05:00')->toIso8601String(),
+        ]))->assertOk()->assertJson(['outcome' => 'applied']);
+
+        $this->assertSame(
+            $moment->utc()->format('Y-m-d H:i:s'),
+            PaymentEvent::query()->sole()->occurred_at->format('Y-m-d H:i:s'),
+        );
+
+        $this->assertSame(
+            $moment->utc()->format('Y-m-d H:i:s'),
+            $order->refresh()->last_payment_event_at->format('Y-m-d H:i:s'),
+        );
+    }
+
+    /**
+     * The guard this protects: an event from another timezone must still be
+     * compared by the instant it happened.
+     */
+    #[Test]
+    public function an_older_event_from_another_timezone_is_still_stale(): void
+    {
+        $order = $this->makeOrder('KEY-CS2-PRIME');
+
+        $this->postJson('/api/v1/webhooks/payment', $this->webhook([
+            'event_id' => 'evt_now',
+            'order_id' => $order->public_id,
+            'created_at' => now()->toIso8601String(),
+        ]))->assertOk();
+
+        // An hour earlier, expressed in a zone five hours ahead: its wall clock
+        // reads later than the event above, its instant does not.
+        $this->postJson('/api/v1/webhooks/payment', $this->webhook([
+            'event_id' => 'evt_earlier_elsewhere',
+            'order_id' => $order->public_id,
+            'status' => 'failed',
+            'created_at' => now()->subHour()->setTimezone('+05:00')->toIso8601String(),
+        ]))->assertOk()->assertJson(['outcome' => 'stale']);
+
+        $this->assertSame(OrderStatus::Paid, $order->refresh()->status);
+    }
+
     #[Test]
     public function unknown_currency_is_rejected_at_boundary(): void
     {
-        $order = $this->makeOrder();
+        $order = $this->makeOrder('KEY-CS2-PRIME');
 
         $this->postJson('/api/v1/webhooks/payment', $this->webhook([
             'order_id' => $order->public_id,
