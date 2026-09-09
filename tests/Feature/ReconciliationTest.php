@@ -13,15 +13,18 @@ use App\Domain\Delivery\Suppliers\SupplierClient;
 use App\Domain\Delivery\Suppliers\SupplierResponse;
 use App\Domain\Ops\Reconciliation\ReconciliationReport;
 use App\Domain\Ops\Recovery\ResolveStuckDeliveries;
+use App\Domain\Ordering\Actions\SettleUnfulfillableItems;
 use App\Domain\Ordering\Enums\OrderStatus;
 use App\Domain\Ordering\Models\Order;
 use App\Domain\Ordering\Models\OrderItem;
 use App\Domain\Payments\Actions\ReplayPendingEvents;
 use App\Domain\Payments\Models\PaymentEvent;
+use App\Domain\Refunds\Gateways\PaymentGateway;
 use App\Jobs\FulfilOrderItemJob;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 use PHPUnit\Framework\Attributes\Test;
+use Tests\Support\FakePaymentGateway;
 use Tests\Support\FakeSupplierClient;
 use Tests\TestCase;
 
@@ -77,13 +80,40 @@ class ReconciliationTest extends TestCase
         ]);
     }
 
+    /**
+     * A healthy system is one that has done work, not one that has done none.
+     *
+     * An empty database passes every check trivially, so this walks an order to
+     * each of its two honest endings first: one line delivered, one refunded. If
+     * a check ever reports normal operation as a discrepancy, this is where it
+     * shows.
+     */
     #[Test]
-    public function clean_system_has_no_discrepancies(): void
+    public function a_system_that_has_settled_real_orders_has_no_discrepancies(): void
     {
+        $this->app->instance(PaymentGateway::class, new FakePaymentGateway);
+
+        $delivered = $this->order(OrderStatus::Paid);
+        $this->supplier->script(SupplierId::A, [SupplierResponse::ok('CLEAN-CODE', 200, 5, 'KEY-CS2-PRIME')]);
+        app(FulfilOrder::class)->handle($delivered->id);
+
+        $refunded = $this->makeOrder('KEY-CS2-PRIME', [
+            'status' => OrderStatus::Paid,
+            'paid_at' => now()->subMinutes(30),
+        ]);
+        $this->supplier->script(SupplierId::A, [SupplierResponse::rejected('out_of_stock', 409, 8)]);
+        $this->supplier->script(SupplierId::B, [SupplierResponse::rejected('out_of_stock', 409, 8)]);
+        app(FulfilOrder::class)->handle($refunded->id);
+        app(SettleUnfulfillableItems::class)->handle();
+
+        $this->assertSame(OrderStatus::Delivered, $delivered->refresh()->status);
+        $this->assertSame(OrderStatus::Refunded, $refunded->refresh()->status);
+
         $report = app(ReconciliationReport::class);
         $result = $report->build();
 
         $this->assertTrue($report->isHealthy($result), json_encode($result['checks'], JSON_UNESCAPED_UNICODE));
+        $this->assertSame(0, $result['checks']['money_conservation']['count']);
     }
 
     #[Test]
