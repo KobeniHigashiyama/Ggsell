@@ -8,7 +8,6 @@ use App\Domain\Delivery\Models\Delivery;
 use App\Domain\Delivery\Models\DeliveryAttempt;
 use App\Domain\Ordering\Enums\OrderStatus;
 use App\Domain\Ordering\Exceptions\IllegalTransition;
-use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Str;
@@ -54,12 +53,6 @@ class Order extends Model
         return $this->hasMany(OrderItem::class)->orderBy('position');
     }
 
-    /** Deliveries across every item of this order. */
-    public function deliveries(): HasMany
-    {
-        return $this->hasMany(Delivery::class);
-    }
-
     public function attempts(): HasMany
     {
         return $this->hasMany(DeliveryAttempt::class);
@@ -92,16 +85,5 @@ class Order extends Model
         $this->status = $target;
 
         return true;
-    }
-
-    /** @param  Builder<self>  $query */
-    public function scopeAwaitingDelivery(Builder $query): void
-    {
-        $query->whereIn('status', OrderStatus::unsettledValues());
-    }
-
-    public function getRouteKeyName(): string
-    {
-        return 'public_id';
     }
 }

@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace App\Domain\Catalog\Models;
 
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\HasOne;
 
 /**
  * @property string $sku
@@ -28,10 +27,5 @@ class Product extends Model
             'is_active' => 'boolean',
             'sort_rank' => 'integer',
         ];
-    }
-
-    public function stock(): HasOne
-    {
-        return $this->hasOne(ProductStock::class, 'sku', 'sku');
     }
 }

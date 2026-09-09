@@ -9,9 +9,7 @@ use App\Domain\Ordering\Models\OrderItem;
 use App\Domain\Refunds\Enums\RefundStatus;
 use App\Domain\Refunds\Gateways\RefundOutcome;
 use App\Domain\Refunds\Gateways\RefundResponse;
-use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
  * Money returned for one order item.
@@ -67,21 +65,5 @@ class Refund extends Model
         $this->gateway_reference = $response->reference ?? $this->gateway_reference;
         $this->failure_reason = $response->reason;
         $this->completed_at = $this->status->isResolved() ? now() : null;
-    }
-
-    public function order(): BelongsTo
-    {
-        return $this->belongsTo(Order::class);
-    }
-
-    public function orderItem(): BelongsTo
-    {
-        return $this->belongsTo(OrderItem::class);
-    }
-
-    /** @param  Builder<self>  $query */
-    public function scopeUnfinished(Builder $query): void
-    {
-        $query->whereIn('status', [RefundStatus::Pending->value, RefundStatus::Unknown->value]);
     }
 }

@@ -23,9 +23,4 @@ final readonly class PaymentWebhookData
         public ?CarbonImmutable $occurredAt,
         public array $raw,
     ) {}
-
-    public function isPaid(): bool
-    {
-        return $this->status === 'paid';
-    }
 }

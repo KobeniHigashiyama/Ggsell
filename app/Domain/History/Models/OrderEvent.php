@@ -6,10 +6,8 @@ namespace App\Domain\History\Models;
 
 use App\Domain\History\Enums\OrderEventType;
 use App\Domain\Ordering\Models\Order;
-use App\Domain\Ordering\Models\OrderItem;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
  * One recorded fact about an order.
@@ -35,16 +33,6 @@ class OrderEvent extends Model
             'occurred_at' => 'datetime',
             'created_at' => 'datetime',
         ];
-    }
-
-    public function order(): BelongsTo
-    {
-        return $this->belongsTo(Order::class);
-    }
-
-    public function orderItem(): BelongsTo
-    {
-        return $this->belongsTo(OrderItem::class);
     }
 
     /** @param  Builder<self>  $query */

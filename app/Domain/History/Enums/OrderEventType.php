@@ -29,14 +29,4 @@ enum OrderEventType: string
     case ItemStatusChanged = 'item.status_changed';
     case OrderStatusChanged = 'order.status_changed';
     case SupplierViolation = 'supplier.violation';
-
-    /** Events that move money, in the direction they move it. */
-    public function moneyDirection(): int
-    {
-        return match ($this) {
-            self::PaymentApplied => 1,
-            self::ItemRefunded => -1,
-            default => 0,
-        };
-    }
 }

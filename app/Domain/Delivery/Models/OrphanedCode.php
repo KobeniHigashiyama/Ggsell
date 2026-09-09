@@ -4,10 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Delivery\Models;
 
-use App\Domain\Ordering\Models\Order;
-use App\Domain\Ordering\Models\OrderItem;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
  * A supplier code that could not be delivered to the item it was issued for.
@@ -24,15 +21,5 @@ class OrphanedCode extends Model
     protected function casts(): array
     {
         return ['resolved_at' => 'datetime'];
-    }
-
-    public function order(): BelongsTo
-    {
-        return $this->belongsTo(Order::class);
-    }
-
-    public function orderItem(): BelongsTo
-    {
-        return $this->belongsTo(OrderItem::class);
     }
 }

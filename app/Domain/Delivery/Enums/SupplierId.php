@@ -16,9 +16,4 @@ enum SupplierId: string
             config('ggsell.suppliers.order'),
         );
     }
-
-    public function label(): string
-    {
-        return 'supplier_'.$this->value;
-    }
 }

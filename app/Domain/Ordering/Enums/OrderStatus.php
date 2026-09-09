@@ -127,11 +127,6 @@ enum OrderStatus: string
         return in_array($this, [self::Delivered, self::PartiallyDelivered, self::Refunded], strict: true);
     }
 
-    public function isAwaitingDelivery(): bool
-    {
-        return in_array($this, [self::Paid, self::Delivering, self::OutOfStock, self::DeliveryFailed], strict: true);
-    }
-
     public function isRecoverable(): bool
     {
         return in_array($this, [self::OutOfStock, self::DeliveryFailed], strict: true);

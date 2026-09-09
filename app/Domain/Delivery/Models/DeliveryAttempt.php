@@ -12,7 +12,6 @@ use App\Domain\Ordering\Models\Order;
 use App\Domain\Ordering\Models\OrderItem;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
  * An attempt to obtain a code from a supplier.
@@ -120,16 +119,6 @@ class DeliveryAttempt extends Model
         return $transportFailure && $mustStayOpen
             ? AttemptStatus::Unknown
             : $incoming;
-    }
-
-    public function order(): BelongsTo
-    {
-        return $this->belongsTo(Order::class);
-    }
-
-    public function orderItem(): BelongsTo
-    {
-        return $this->belongsTo(OrderItem::class);
     }
 
     /** @param  Builder<self>  $query */

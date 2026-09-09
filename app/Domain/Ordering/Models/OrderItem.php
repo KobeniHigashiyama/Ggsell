@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Domain\Ordering\Models;
 
-use App\Domain\Catalog\Models\Product;
 use App\Domain\Delivery\Models\Delivery;
 use App\Domain\Delivery\Models\DeliveryAttempt;
 use App\Domain\Ordering\Enums\OrderItemStatus;
@@ -60,11 +59,6 @@ class OrderItem extends Model
     public function order(): BelongsTo
     {
         return $this->belongsTo(Order::class);
-    }
-
-    public function product(): BelongsTo
-    {
-        return $this->belongsTo(Product::class, 'sku', 'sku');
     }
 
     public function delivery(): HasOne
@@ -128,10 +122,5 @@ class OrderItem extends Model
             OrderItemStatus::Delivered->value,
             OrderItemStatus::Refunded->value,
         ]);
-    }
-
-    public function getRouteKeyName(): string
-    {
-        return 'public_id';
     }
 }
